@@ -643,7 +643,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
 
-    // --detach: launch daemon via schtasks so it survives SSH disconnection
+    // --detach: launch daemon via schtasks batch file so it survives SSH disconnection
     #[cfg(windows)]
     if opts.detach {
         let task_name = format!("AgentBrowserDaemon_{}", session);
@@ -652,10 +652,18 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        // Write a batch file that starts the daemon in the user's session
+        let bat_path = get_socket_dir().join(format!("{}.bat", session));
+        let cdp = opts.cdp.unwrap_or("9222");
+        let bat = format!(
+            "@echo off\r\nset AGENT_BROWSER_CDP={}\r\nset AGENT_BROWSER_HEADED=0\r\n\"{}\" get url\r\n",
+            cdp, exe_path.display()
+        );
+        fs::write(&bat_path, bat).map_err(|e| format!("Failed to write batch file: {}", e))?;
         let status = Command::new("schtasks")
             .args([
                 "/Create", "/TN", &task_name,
-                "/TR", &format!("\"{}\" daemon --cdp {}", exe_path.display(), opts.cdp.unwrap_or("9222")),
+                "/TR", &bat_path.to_string_lossy(),
                 "/SC", "ONCE", "/ST", "00:00", "/IT", "/F",
             ])
             .status()
