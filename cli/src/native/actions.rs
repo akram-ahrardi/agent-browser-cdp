@@ -2332,7 +2332,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         if sniff_target == "layout" {
             // Return all landmarks found
             let js = "JSON.stringify({nav: document.querySelector('nav') ? document.querySelector('nav').innerText.substring(0,500) : null, main: document.querySelector('main,[role=main]') ? document.querySelector('main,[role=main]').innerText.substring(0,1000) : null, header: document.querySelector('header,[role=banner]') ? document.querySelector('header,[role=banner]').innerText.substring(0,200) : null, footer: document.querySelector('footer,[role=contentinfo]') ? document.querySelector('footer,[role=contentinfo]').innerText.substring(0,300) : null, aside: document.querySelector('aside,[role=complementary]') ? document.querySelector('aside,[role=complementary]').innerText.substring(0,300) : null, articles: document.querySelectorAll('article').length })";
-            let layout = mgr.evaluate_simple(js).await.unwrap_or_default();
+            let layout_raw = mgr.evaluate_simple(js).await.unwrap_or_default();
+            let layout: Value = layout_raw
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
             if let Some(obj) = result.as_object_mut() {
                 obj.insert("layout".to_string(), layout);
             }
@@ -2346,21 +2350,23 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 )
             };
             let sniff_result = mgr.evaluate_simple(&js).await.unwrap_or_default();
+            // evaluate_simple returns a JSON string, parse it
+            let parsed: Value = sniff_result
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
             if let Some(obj) = result.as_object_mut() {
-                if let Some(parsed) = sniff_result.as_object() {
-                    if let Some(t) = parsed.get("text").and_then(|v| v.as_str()) {
-                        obj.insert("text".to_string(), json!(t));
-                    }
-                    if let Some(a) = parsed.get("articles") {
-                        obj.insert("articles".to_string(), a.clone());
-                    }
-                    // Auto mode also returns nav/main/header landmarks
-                    if let Some(n) = parsed.get("nav") {
-                        obj.insert("nav_text".to_string(), n.clone());
-                    }
-                    if let Some(m) = parsed.get("main") {
-                        obj.insert("main_text".to_string(), m.clone());
-                    }
+                if let Some(t) = parsed.get("text").and_then(|v| v.as_str()) {
+                    obj.insert("text".to_string(), json!(t));
+                }
+                if let Some(a) = parsed.get("articles") {
+                    obj.insert("articles".to_string(), a.clone());
+                }
+                if let Some(n) = parsed.get("nav") {
+                    obj.insert("nav_text".to_string(), n.clone());
+                }
+                if let Some(m) = parsed.get("main") {
+                    obj.insert("main_text".to_string(), m.clone());
                 }
             }
         }
