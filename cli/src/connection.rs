@@ -414,6 +414,7 @@ pub struct DaemonOptions<'a> {
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
+    pub detach: bool,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -641,6 +642,55 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+
+    // --detach on Windows: launch daemon via schtasks so it survives SSH disconnection
+    #[cfg(windows)]
+    if opts.detach {
+        use std::fs;
+        let task_name = format!("AgentBrowserDaemon_{}", session);
+        // Clean up any previously scheduled task
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/TN", &task_name, "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Write a batch file that starts the daemon (no command — daemon just idles)
+        let bat_path = get_socket_dir().join(format!("{}.bat", session));
+        let cdp = opts.cdp.unwrap_or("9222");
+        let bat = format!(
+            "@echo off\r\n\
+             set AGENT_BROWSER_DAEMON=1\r\n\
+             set AGENT_BROWSER_CDP={}\r\n\
+             start \"\" /B \"{}\"\r\n",
+            cdp, exe_path.display()
+        );
+        fs::write(&bat_path, bat.as_bytes()).map_err(|e| format!("Failed to write daemon batch: {}", e))?;
+        // Schedule and run the task
+        let status = Command::new("schtasks")
+            .args([
+                "/Create", "/TN", &task_name,
+                "/TR", &bat_path.to_string_lossy(),
+                "/SC", "ONCE", "/ST", "00:00", "/IT", "/F",
+            ])
+            .status()
+            .map_err(|e| format!("Failed to create daemon task: {}", e))?;
+        if !status.success() {
+            return Err("Failed to create daemon task".to_string());
+        }
+        let _ = Command::new("schtasks")
+            .args(["/Run", "/TN", &task_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Wait up to 15s for the daemon to become ready
+        for _ in 0..75 {
+            thread::sleep(Duration::from_millis(200));
+            if daemon_ready(session) {
+                return Ok(DaemonResult { already_running: false });
+            }
+        }
+        return Err("Detached daemon failed to start within 15s".to_string());
+    }
 
     #[allow(unused_assignments)]
     let mut daemon_child: Option<std::process::Child> = None;

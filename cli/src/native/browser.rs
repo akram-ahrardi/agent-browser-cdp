@@ -296,7 +296,7 @@ pub struct BrowserManager {
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
-    active_page_index: usize,
+    pub active_page_index: usize,
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
