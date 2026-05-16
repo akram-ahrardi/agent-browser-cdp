@@ -747,7 +747,9 @@ impl BrowserManager {
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
+        eprintln!("[daemon] get_url: calling evaluate_simple");
         let result = self.evaluate_simple("location.href").await?;
+        eprintln!("[daemon] get_url: result={:?}", result);
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
@@ -765,6 +767,7 @@ impl BrowserManager {
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        eprintln!("[daemon] evaluate: '{}' on session {}", script, session_id);
 
         let result: EvaluateResult = self
             .client

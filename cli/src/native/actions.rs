@@ -1517,6 +1517,7 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
+    eprintln!("[daemon] auto_launch: start");
     let mut options = launch_options_from_env();
 
     // Use the stream server's viewport dimensions for --window-size so the
@@ -1544,16 +1545,21 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
+        eprintln!("[daemon] auto_launch: connecting CDP {}", cdp);
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        eprintln!("[daemon] auto_launch: CDP connected, {} pages", mgr.page_count());
         state.reset_input_state();
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        eprintln!("[daemon] auto_launch: handlers started, running init scripts");
         apply_launch_init_scripts(state).await;
+        eprintln!("[daemon] auto_launch: init scripts done");
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
+        eprintln!("[daemon] auto_launch: done");
         return Ok(());
     }
 
@@ -2377,6 +2383,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
+    eprintln!("[daemon] handle_url: start");
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let url = wb.get_url().await?;
@@ -2384,7 +2391,9 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
         }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    eprintln!("[daemon] handle_url: got mgr, active_idx={}", mgr.active_page_index);
     let url = mgr.get_url().await?;
+    eprintln!("[daemon] handle_url: url={}", url);
     Ok(json!({ "url": url }))
 }
 
