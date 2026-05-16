@@ -1086,20 +1086,26 @@ fn print_sniff_fields(data: &serde_json::Value) {
         return;
     }
 
-    // Regular sniff: show articles + text
+    // Regular sniff: show articles + text (from text or main_text field)
     let mut printed = false;
     if let Some(articles) = data.get("articles").and_then(|v| v.as_u64()) {
         println!("  {} articles: {}", color::bold("→"), articles);
         printed = true;
     }
-    if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+    // Also show nav_text if available
+    if let Some(nav_text) = data.get("nav_text").and_then(|v| v.as_str()) {
+        if !nav_text.is_empty() {
+            println!("  nav: {}", nav_text.lines().take(3).collect::<Vec<_>>().join(" | "));
+        }
+    }
+    let display_text = data.get("text").or_else(|| data.get("main_text"));
+    if let Some(text) = display_text.and_then(|v| v.as_str()) {
         if !text.is_empty() {
             if printed {
                 println!("  text:");
             } else {
                 println!("{} text:", color::bold("→"));
             }
-            // Print first 500 chars on one line, rest indented
             let display = if text.len() > 500 { &text[..500] } else { text };
             for line in display.lines().take(15) {
                 println!("    {}", line);
