@@ -308,6 +308,7 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub detach: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -445,6 +446,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        detach: false,
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -686,6 +688,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--detach" => {
+                flags.detach = true;
+            }
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session_name = Some(s.clone());
@@ -842,6 +847,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ignore-https-errors",
         "--allow-file-access",
         "--auto-connect",
+        "--detach",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",

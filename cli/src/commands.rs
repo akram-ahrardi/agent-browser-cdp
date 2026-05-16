@@ -345,13 +345,127 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
         // === State (interactive elements) ===
         "state" => {
-            let max: usize = rest
-                .iter()
-                .find(|&&s| s.starts_with("--max="))
-                .and_then(|s| s.strip_prefix("--max="))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(50);
-            Ok(json!({ "id": id, "action": "state", "max": max }))
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
+            match rest.first().copied() {
+                Some("save") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state save".to_string(),
+                        usage: "state save <path>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
+                }
+                Some("load") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state load".to_string(),
+                        usage: "state load <path>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
+                }
+                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
+                Some("clear") => {
+                    let mut session_name: Option<&str> = None;
+                    let mut all = false;
+
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--all" | "-a" => {
+                                all = true;
+                            }
+                            arg if !arg.starts_with('-') => {
+                                session_name = Some(arg);
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+
+                    if let Some(name) = session_name {
+                        if !is_valid_session_name(name) {
+                            return Err(ParseError::InvalidSessionName {
+                                name: name.to_string(),
+                            });
+                        }
+                    }
+
+                    let mut cmd = json!({ "id": id, "action": "state_clear" });
+                    if all {
+                        cmd["all"] = json!(true);
+                    }
+                    if let Some(name) = session_name {
+                        cmd["sessionName"] = json!(name);
+                    }
+                    Ok(cmd)
+                }
+                Some("show") => {
+                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state show".to_string(),
+                        usage: "state show <filename>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
+                }
+                Some("clean") => {
+                    let mut days: Option<i64> = None;
+
+                    let mut i = 1;
+                    while i < rest.len() {
+                        if rest[i] == "--older-than" {
+                            if let Some(d) = rest.get(i + 1) {
+                                days = d.parse().ok();
+                                i += 1;
+                            }
+                        }
+                        i += 1;
+                    }
+
+                    let days = days.ok_or_else(|| ParseError::MissingArguments {
+                        context: "state clean".to_string(),
+                        usage: "state clean --older-than <days>",
+                    })?;
+
+                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                }
+                Some("rename") => {
+                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let old_name = old_name.trim_end_matches(".json");
+                    let new_name = new_name.trim_end_matches(".json");
+
+                    if !is_valid_session_name(old_name) {
+                        return Err(ParseError::InvalidSessionName {
+                            name: old_name.to_string(),
+                        });
+                    }
+                    if !is_valid_session_name(new_name) {
+                        return Err(ParseError::InvalidSessionName {
+                            name: new_name.to_string(),
+                        });
+                    }
+
+                    Ok(
+                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
+                    )
+                }
+                Some(sub) if !sub.starts_with("-") => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                _ => {
+                    let max: usize = rest
+                        .iter()
+                        .find(|&&s| s.starts_with("--max="))
+                        .and_then(|s| s.strip_prefix("--max="))
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(50);
+                    Ok(json!({ "id": id, "action": "state", "max": max }))
+                }
+            }
         }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1498,126 +1612,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 valid_options: &["read", "write", "copy", "paste"],
             }),
         },
-
-        // === State ===
-        "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
-            match rest.first().copied() {
-                Some("save") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state save".to_string(),
-                        usage: "state save <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
-                }
-                Some("load") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state load".to_string(),
-                        usage: "state load <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
-                }
-                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
-                Some("clear") => {
-                    let mut session_name: Option<&str> = None;
-                    let mut all = false;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        match rest[i] {
-                            "--all" | "-a" => {
-                                all = true;
-                            }
-                            arg if !arg.starts_with('-') => {
-                                session_name = Some(arg);
-                            }
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-
-                    if let Some(name) = session_name {
-                        if !is_valid_session_name(name) {
-                            return Err(ParseError::InvalidSessionName {
-                                name: name.to_string(),
-                            });
-                        }
-                    }
-
-                    let mut cmd = json!({ "id": id, "action": "state_clear" });
-                    if all {
-                        cmd["all"] = json!(true);
-                    }
-                    if let Some(name) = session_name {
-                        cmd["sessionName"] = json!(name);
-                    }
-                    Ok(cmd)
-                }
-                Some("show") => {
-                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state show".to_string(),
-                        usage: "state show <filename>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
-                }
-                Some("clean") => {
-                    let mut days: Option<i64> = None;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        if rest[i] == "--older-than" {
-                            if let Some(d) = rest.get(i + 1) {
-                                days = d.parse().ok();
-                                i += 1;
-                            }
-                        }
-                        i += 1;
-                    }
-
-                    let days = days.ok_or_else(|| ParseError::MissingArguments {
-                        context: "state clean".to_string(),
-                        usage: "state clean --older-than <days>",
-                    })?;
-
-                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
-                }
-                Some("rename") => {
-                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let old_name = old_name.trim_end_matches(".json");
-                    let new_name = new_name.trim_end_matches(".json");
-
-                    if !is_valid_session_name(old_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: old_name.to_string(),
-                        });
-                    }
-                    if !is_valid_session_name(new_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: new_name.to_string(),
-                        });
-                    }
-
-                    Ok(
-                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
-                    )
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "state".to_string(),
-                    usage: "state <save|load|list|clear|show|clean|rename> ...",
-                }),
-            }
-        }
 
         // === iOS-specific commands ===
         "tap" => {

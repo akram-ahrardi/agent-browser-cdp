@@ -756,6 +756,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        detach: flags.detach,
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
