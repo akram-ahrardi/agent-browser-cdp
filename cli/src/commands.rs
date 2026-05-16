@@ -292,6 +292,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
+            if rest.iter().any(|&s| s == "--sniff") {
+                nav_cmd["sniff"] = json!(true);
+            }
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }

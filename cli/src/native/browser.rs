@@ -577,8 +577,14 @@ impl BrowserManager {
                 });
             }
 
-            self.active_page_index = 0;
-            let session_id = self.pages[0].session_id.clone();
+            // Pick the first non-blank page as active, preserving natural tab order
+            self.active_page_index = (0..self.pages.len())
+                .find(|&i| {
+                    let url = &self.pages[i].url;
+                    !url.is_empty() && url != "about:blank"
+                })
+                .unwrap_or(0);
+            let session_id = self.pages[self.active_page_index].session_id.clone();
             self.enable_domains(&session_id).await?;
         }
 
@@ -785,7 +791,7 @@ impl BrowserManager {
         Ok(result.result.value.unwrap_or(Value::Null))
     }
 
-    async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
+    pub async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
         self.evaluate(expression, None).await
     }
 

@@ -1502,13 +1502,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, None).await?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let _ = mgr
-        .client
-        .send_command("Page.bringToFront", None, Some(&session_id))
-        .await;
+    let mgr = BrowserManager::connect_auto().await?;
+    // Don't create a new tab — discover_and_attach_targets already sets the
+    // active page to the first non-blank discovered tab. Just bring it to front.
+    if mgr.page_count() > 0 {
+        let session_id = mgr.active_session_id()?.to_string();
+        let _ = mgr
+            .client
+            .send_command("Page.bringToFront", None, Some(&session_id))
+            .await;
+    }
     Ok(mgr)
 }
 
@@ -2279,7 +2282,56 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+
+    // --sniff: after navigation, poll for content up to 10s
+    let sniff = cmd.get("sniff").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut result = mgr.navigate(url, wait_until).await?;
+
+    if sniff {
+        // Poll for articles/text to appear (SPA rendering), max 10s
+        let sniff_fut = async {
+            for _ in 0..10 {
+                // Brief pause for React rendering
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let article_count = mgr
+                    .evaluate_simple("document.querySelectorAll('article').length")
+                    .await
+                    .unwrap_or_default();
+                // If articles loaded or body has text, we're done
+                let body_has_text = mgr
+                    .evaluate_simple("document.body.innerText.length > 100")
+                    .await
+                    .unwrap_or(json!(false));
+                if article_count.as_u64().unwrap_or(0) > 0 || body_has_text.as_bool().unwrap_or(false) {
+                    break;
+                }
+            }
+            let body_text = mgr
+                .evaluate_simple("document.body.innerText.substring(0, 2000)")
+                .await
+                .unwrap_or_default();
+            let article_count = mgr
+                .evaluate_simple("document.querySelectorAll('article').length")
+                .await
+                .unwrap_or_default();
+            (body_text, article_count)
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), sniff_fut).await {
+            Ok((body_text, article_count)) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("text".to_string(), body_text);
+                    obj.insert("articles".to_string(), article_count);
+                }
+            }
+            Err(_) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("warning".to_string(), json!("Content load timed out after 10s"));
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
