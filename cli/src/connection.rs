@@ -656,7 +656,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         let bat_path = get_socket_dir().join(format!("{}.bat", session));
         let cdp = opts.cdp.unwrap_or("9222");
         let bat = format!(
-            "@echo off\r\nset AGENT_BROWSER_CDP={}\r\nset AGENT_BROWSER_HEADED=0\r\n\"{}\" get url\r\n",
+            "@echo off\r\nset AGENT_BROWSER_CDP={}\r\nstart \"\" \"{}\" get url\r\n",
             cdp, exe_path.display()
         );
         fs::write(&bat_path, bat).map_err(|e| format!("Failed to write batch file: {}", e))?;
