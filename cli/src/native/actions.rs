@@ -2288,46 +2288,27 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let mut result = mgr.navigate(url, wait_until).await?;
 
     if sniff {
-        // Poll for articles/text to appear (SPA rendering), max 10s
-        let sniff_fut = async {
-            for _ in 0..10 {
-                // Brief pause for React rendering
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                let article_count = mgr
-                    .evaluate_simple("document.querySelectorAll('article').length")
-                    .await
-                    .unwrap_or_default();
-                // If articles loaded or body has text, we're done
-                let body_has_text = mgr
-                    .evaluate_simple("document.body.innerText.length > 100")
-                    .await
-                    .unwrap_or(json!(false));
-                if article_count.as_u64().unwrap_or(0) > 0 || body_has_text.as_bool().unwrap_or(false) {
-                    break;
-                }
-            }
-            let body_text = mgr
-                .evaluate_simple("document.body.innerText.substring(0, 2000)")
-                .await
-                .unwrap_or_default();
-            let article_count = mgr
+        // Wait for SPA to render: 5s, then another 5s if empty.
+        // X.com React can take several seconds to hydrate.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let mut article_count = mgr
+            .evaluate_simple("document.querySelectorAll('article').length")
+            .await
+            .unwrap_or_default();
+        if article_count.as_u64().unwrap_or(0) == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            article_count = mgr
                 .evaluate_simple("document.querySelectorAll('article').length")
                 .await
                 .unwrap_or_default();
-            (body_text, article_count)
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(10), sniff_fut).await {
-            Ok((body_text, article_count)) => {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("text".to_string(), body_text);
-                    obj.insert("articles".to_string(), article_count);
-                }
-            }
-            Err(_) => {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("warning".to_string(), json!("Content load timed out after 10s"));
-                }
-            }
+        }
+        let body_text = mgr
+            .evaluate_simple("document.body.innerText.substring(0, 2000)")
+            .await
+            .unwrap_or_default();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("text".to_string(), body_text);
+            obj.insert("articles".to_string(), article_count);
         }
     }
 
