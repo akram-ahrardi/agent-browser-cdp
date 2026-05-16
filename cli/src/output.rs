@@ -231,9 +231,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                print_sniff_fields(data);
                 return;
             }
             println!("{}", url);
+            print_sniff_fields(data);
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
@@ -1050,6 +1052,32 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 fn print_warning(resp: &Response) {
     if let Some(ref warning) = resp.warning {
         eprintln!("{} {}", color::warning_indicator(), warning);
+    }
+}
+
+/// Print sniff fields (articles, text) from a navigation response.
+fn print_sniff_fields(data: &serde_json::Value) {
+    let mut printed = false;
+    if let Some(articles) = data.get("articles").and_then(|v| v.as_u64()) {
+        println!("  {} articles: {}", color::bold("→"), articles);
+        printed = true;
+    }
+    if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+        if !text.is_empty() {
+            if printed {
+                println!("  text:");
+            } else {
+                println!("{} text:", color::bold("→"));
+            }
+            // Print first 500 chars on one line, rest indented
+            let display = if text.len() > 500 { &text[..500] } else { text };
+            for line in display.lines().take(15) {
+                println!("    {}", line);
+            }
+            if text.len() > 500 {
+                println!("    … ({} more chars)", text.len() - 500);
+            }
+        }
     }
 }
 
