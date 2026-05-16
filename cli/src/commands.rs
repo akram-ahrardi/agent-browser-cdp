@@ -292,8 +292,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            if rest.iter().any(|&s| s == "--sniff") {
-                nav_cmd["sniff"] = json!(true);
+            // --sniff: optional value for target (auto, main, nav, header, footer, aside, layout, #css)
+            if let Some(sniff_val) = rest.iter().find(|&&s| s.starts_with("--sniff")) {
+                if *sniff_val == "--sniff" {
+                    // --sniff without = value → auto
+                    nav_cmd["sniff"] = json!("auto");
+                } else if let Some(eq_pos) = sniff_val.find('=') {
+                    let val = &sniff_val[eq_pos + 1..];
+                    nav_cmd["sniff"] = json!(val);
+                }
             }
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");

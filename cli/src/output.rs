@@ -1055,8 +1055,38 @@ fn print_warning(resp: &Response) {
     }
 }
 
-/// Print sniff fields (articles, text) from a navigation response.
+/// Print sniff fields (articles, text, layout) from a navigation response.
 fn print_sniff_fields(data: &serde_json::Value) {
+    // Layout mode: show available landmarks
+    if let Some(layout) = data.get("layout") {
+        if let Some(obj) = layout.as_object() {
+            println!("{} page layout:", color::bold("→"));
+            for (name, content) in obj {
+                let label = match name.as_str() {
+                    "nav" => "nav (sidebar)",
+                    "main" => "main (primary content)",
+                    "header" => "header",
+                    "footer" => "footer",
+                    "aside" => "aside",
+                    "articles" => continue, // shown separately
+                    _ => name.as_str(),
+                };
+                let has = !content.is_null();
+                let size = content.as_str().map(|s| s.len()).unwrap_or(0);
+                println!("  {:30} {}", label, if has { format!("{} chars", size) } else { "—".to_string() });
+            }
+        }
+        if let Some(articles) = data.get("articles").or_else(|| {
+            data.get("layout").and_then(|l| l.get("articles"))
+        }) {
+            if let Some(n) = articles.as_u64() {
+                println!("  {:30} {}", "articles", n);
+            }
+        }
+        return;
+    }
+
+    // Regular sniff: show articles + text
     let mut printed = false;
     if let Some(articles) = data.get("articles").and_then(|v| v.as_u64()) {
         println!("  {} articles: {}", color::bold("→"), articles);

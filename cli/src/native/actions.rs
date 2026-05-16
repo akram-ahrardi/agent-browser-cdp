@@ -2287,9 +2287,17 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let sniff = cmd.get("sniff").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut result = mgr.navigate(url, wait_until).await?;
 
-    if sniff {
-        // Wait for SPA to render: 5s, then another 5s if empty.
-        // X.com React can take several seconds to hydrate.
+    // --sniff: wait for SPA to render (5s + 5s retry), then capture content.
+    // Supports: --sniff (auto), --sniff main|nav|header|footer|aside|#css|layout
+    let sniff_raw = cmd.get("sniff");
+    let sniff_enabled = sniff_raw.map_or(false, |v| !v.is_null());
+    if sniff_enabled {
+        let sniff_target = sniff_raw
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("auto");
+
+        // Wait for SPA to render
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let mut article_count = mgr
             .evaluate_simple("document.querySelectorAll('article').length")
@@ -2302,13 +2310,59 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 .await
                 .unwrap_or_default();
         }
-        let body_text = mgr
-            .evaluate_simple("document.body.innerText.substring(0, 2000)")
-            .await
-            .unwrap_or_default();
-        if let Some(obj) = result.as_object_mut() {
-            obj.insert("text".to_string(), body_text);
-            obj.insert("articles".to_string(), article_count);
+
+        // Resolve target selector (only for non-auto, non-layout modes)
+        let selector = match sniff_target {
+            "auto" => {
+                // Prefer <main>, then [role=main], then first <article>, else body
+                "(function(){return document.querySelector('main') ? 'main' : document.querySelector('[role=main]') ? '[role=main]' : document.querySelector('article') ? 'article' : 'body'})()".to_string()
+            }
+            "layout" => "layout".to_string(),
+            "main" => "'main'".to_string(),
+            "nav" => "'nav'".to_string(),
+            "header" => "'header'".to_string(),
+            "footer" => "'footer'".to_string(),
+            "aside" => "'aside'".to_string(),
+            s if s.starts_with('#') || s.starts_with('.') || s.starts_with('[') => {
+                format!("'{}'", s.replace('\'', "\\'"))
+            }
+            other => format!("'{}'", other.replace('\'', "\\'")),
+        };
+
+        if sniff_target == "layout" {
+            // Return all landmarks found
+            let js = "JSON.stringify({nav: document.querySelector('nav') ? document.querySelector('nav').innerText.substring(0,500) : null, main: document.querySelector('main,[role=main]') ? document.querySelector('main,[role=main]').innerText.substring(0,1000) : null, header: document.querySelector('header,[role=banner]') ? document.querySelector('header,[role=banner]').innerText.substring(0,200) : null, footer: document.querySelector('footer,[role=contentinfo]') ? document.querySelector('footer,[role=contentinfo]').innerText.substring(0,300) : null, aside: document.querySelector('aside,[role=complementary]') ? document.querySelector('aside,[role=complementary]').innerText.substring(0,300) : null, articles: document.querySelectorAll('article').length })";
+            let layout = mgr.evaluate_simple(js).await.unwrap_or_default();
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("layout".to_string(), layout);
+            }
+        } else {
+            let js = if sniff_target == "auto" {
+                "JSON.stringify({nav: document.querySelector('nav') ? document.querySelector('nav').innerText.substring(0,500) : null, main: document.querySelector('main,[role=main]') ? document.querySelector('main,[role=main]').innerText.substring(0,1000) : null, header: document.querySelector('header,[role=banner]') ? document.querySelector('header,[role=banner]').innerText.substring(0,200) : null, articles: document.querySelectorAll('article').length })".to_string()
+            } else {
+                format!(
+                    "(function(){{var el=document.querySelector({sel});return JSON.stringify({{text:el?el.innerText.substring(0,2000):'',articles:document.querySelectorAll('article').length}})}})()",
+                    sel = &selector
+                )
+            };
+            let sniff_result = mgr.evaluate_simple(&js).await.unwrap_or_default();
+            if let Some(obj) = result.as_object_mut() {
+                if let Some(parsed) = sniff_result.as_object() {
+                    if let Some(t) = parsed.get("text").and_then(|v| v.as_str()) {
+                        obj.insert("text".to_string(), json!(t));
+                    }
+                    if let Some(a) = parsed.get("articles") {
+                        obj.insert("articles".to_string(), a.clone());
+                    }
+                    // Auto mode also returns nav/main/header landmarks
+                    if let Some(n) = parsed.get("nav") {
+                        obj.insert("nav_text".to_string(), n.clone());
+                    }
+                    if let Some(m) = parsed.get("main") {
+                        obj.insert("main_text".to_string(), m.clone());
+                    }
+                }
+            }
         }
     }
 
