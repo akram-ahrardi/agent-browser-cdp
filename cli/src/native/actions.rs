@@ -1292,6 +1292,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "evaluate" => handle_evaluate(cmd, state).await,
         "close" => handle_close(state).await,
         "snapshot" => handle_snapshot(cmd, state).await,
+        "state" => handle_state(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
         "click" => handle_click(cmd, state).await,
         "dblclick" => handle_dblclick(cmd, state).await,
@@ -2593,6 +2594,35 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
 }
 
+/// Resolve a numeric state ref (e.g. "5" → "[data-ab-ref='5']").
+/// Non-numeric selectors pass through unchanged.
+fn resolve_state_ref(selector: &str) -> String {
+    if let Ok(n) = selector.parse::<u32>() {
+        format!("[data-ab-ref='{}']", n)
+    } else {
+        selector.to_string()
+    }
+}
+
+async fn handle_state(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let max = cmd.get("max").and_then(|v| v.as_u64()).unwrap_or(50);
+
+    // Tag interactive elements with data-ab-ref attributes and return their info
+    let js = format!(
+        r#"(()=>{{document.querySelectorAll('[data-ab-ref]').forEach(e=>e.removeAttribute('data-ab-ref'));var sel='a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link],[role=tab],[onclick],[tabindex]:not([tabindex="-1"])';var els=document.querySelectorAll(sel);var out=[];for(var i=0;i<els.length&&out.length<{max};i++){{var e=els[i];if(!e.offsetParent)continue;var idx=out.length+1;e.setAttribute('data-ab-ref',idx);var tag=e.tagName.toLowerCase();var t=e.getAttribute('type')||'';var txt=(e.innerText||e.value||e.placeholder||e.getAttribute('aria-label')||'').substring(0,80).replace(/\s+/g,' ').trim();var href=e.href?e.href.substring(0,100):'';out.push([idx,tag,t,txt,href]);}}return JSON.stringify(out);}})()"#,
+        max = max
+    );
+    let raw = mgr.evaluate_simple(&js).await.unwrap_or_default();
+    let items: Value = raw.as_str()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let url = mgr.get_url().await.unwrap_or_default();
+    let title = mgr.get_title().await.unwrap_or_default();
+    Ok(json!({ "url": url, "title": title, "elements": items }))
+}
+
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let annotate = cmd
         .get("annotate")
@@ -2702,10 +2732,12 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
+    let raw_selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    // Resolve numeric ref (from state command) to DOM attribute
+    let selector = resolve_state_ref(raw_selector);
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -2798,10 +2830,11 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
+    let raw_selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let selector = resolve_state_ref(raw_selector);
     let value = cmd
         .get("value")
         .and_then(|v| v.as_str())

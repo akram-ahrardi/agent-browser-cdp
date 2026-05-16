@@ -343,6 +343,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 Ok(json!({ "id": id, "action": "click", "selector": sel }))
             }
         }
+        // === State (interactive elements) ===
+        "state" => {
+            let max: usize = rest
+                .iter()
+                .find(|&&s| s.starts_with("--max="))
+                .and_then(|s| s.strip_prefix("--max="))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50);
+            Ok(json!({ "id": id, "action": "state", "max": max }))
+        }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),

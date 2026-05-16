@@ -226,6 +226,30 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // State response: show numbered interactive elements
+        if action == Some("state") {
+            if let Some(elements) = data.get("elements").and_then(|v| v.as_array()) {
+                if !elements.is_empty() {
+                    println!("{} interactive elements:", color::bold("→"));
+                    for el in elements {
+                        if let Some(arr) = el.as_array() {
+                            let idx = arr.get(0).and_then(|v| v.as_u64()).unwrap_or(0);
+                            let tag = arr.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                            let typ = arr.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                            let txt = arr.get(3).and_then(|v| v.as_str()).unwrap_or("");
+                            let href = arr.get(4).and_then(|v| v.as_str()).unwrap_or("");
+                            let type_str = if typ.is_empty() { tag.to_string() } else { format!("{}[{}]", tag, typ) };
+                            let info = if !href.is_empty() { href } else { txt };
+                            println!("  {:>4} {:12} {}", format!("[{}]", idx), type_str, info);
+                        }
+                    }
+                } else {
+                    println!("  no interactive elements found");
+                }
+            }
+            print_warning(resp);
+            return;
+        }
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
