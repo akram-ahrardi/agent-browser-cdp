@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -180,6 +180,10 @@ struct CursorElementInfo {
     text: String, // textContent from the DOM element (fallback when ARIA name is empty)
     hidden_input_kind: Option<HiddenInputKind>,
     hidden_input_checked: Option<String>, // "true", "false", or "mixed" (tristate)
+    tag_name: String,
+    role_candidate: Option<String>, // e.g. "textbox" for contenteditable, "button" for cursor:pointer
+    label: String, // first 60 chars of textContent/placeholder/aria-label
+    selector: String, // unique CSS selector for selector-based targeting
 }
 
 struct RoleNameTracker {
@@ -411,6 +415,46 @@ pub async fn take_snapshot(
         }
     }
 
+    // --- Orphan scan: add refs for cursor-interactive elements not found in AX tree ---
+    // Contenteditable divs and other elements Chrome omits from the accessibility tree
+    // get synthetic refs backed by CSS selectors so they appear in `state` output.
+    let matched_ids: HashSet<i64> = nodes_with_refs
+        .iter()
+        .filter_map(|(idx, _)| tree_nodes[*idx].backend_node_id)
+        .collect();
+
+    let mut orphan_tracker = RoleNameTracker::new();
+
+    for (backend_node_id, info) in &cursor_elements {
+        if !matched_ids.contains(backend_node_id) {
+            let role = info.role_candidate.as_deref().unwrap_or("generic");
+            let name = if !info.label.is_empty() {
+                &info.label
+            } else if !info.text.is_empty() {
+                &info.text
+            } else {
+                ""
+            };
+            let sel = info.selector.as_str();
+            if sel.is_empty() {
+                continue; // skip elements we can't target
+            }
+            let nth = if !name.is_empty() {
+                Some(orphan_tracker.track(role, name, 0))
+            } else {
+                None
+            };
+            ref_map.add_selector(
+                format!("e{}", next_ref),
+                sel.to_string(),
+                role,
+                name,
+                nth,
+            );
+            next_ref += 1;
+        }
+    }
+
     ref_map.set_next_ref_num(next_ref);
 
     if options.urls {
@@ -624,6 +668,30 @@ async fn find_cursor_interactive_elements(
     var results = [];
     if (!document.body) return results;
 
+    function buildSelector(el) {
+        if (el.id) return '#' + CSS.escape(el.id);
+        var path = [];
+        while (el && el !== document.body) {
+            var tag = el.tagName.toLowerCase();
+            if (el.getAttribute('contenteditable') !== null) {
+                tag += '[contenteditable]';
+            }
+            var parent = el.parentElement;
+            if (parent) {
+                var siblings = Array.from(parent.children).filter(function(s) {
+                    return s.tagName === el.tagName;
+                });
+                if (siblings.length > 1) {
+                    var idx = siblings.indexOf(el) + 1;
+                    tag += ':nth-of-type(' + idx + ')';
+                }
+            }
+            path.unshift(tag);
+            el = parent;
+        }
+        return path.join(' > ');
+    }
+
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
         'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
@@ -683,6 +751,31 @@ async fn find_cursor_interactive_elements(
             }
         }
 
+        var roleCandidate = null;
+        if (isEditable) {
+            roleCandidate = 'textbox';
+        } else if (hasCursorPointer || hasOnClick) {
+            roleCandidate = 'button';
+        }
+
+        var label = '';
+        var textContent = (el.textContent || '').trim();
+        if (textContent) {
+            label = textContent.slice(0, 60);
+        } else {
+            var placeholder = el.getAttribute('placeholder');
+            if (placeholder) {
+                label = placeholder.trim().slice(0, 60);
+            } else {
+                var ariaLabel = el.getAttribute('aria-label');
+                if (ariaLabel) {
+                    label = ariaLabel.trim().slice(0, 60);
+                }
+            }
+        }
+
+        var selector = buildSelector(el);
+
         el.setAttribute('data-__ab-ci', String(results.length));
         results.push({
             text: text,
@@ -692,7 +785,10 @@ async fn find_cursor_interactive_elements(
             hasTabIndex: hasTabIndex,
             isEditable: isEditable,
             hiddenInputType: hiddenInputType,
-            hiddenInputChecked: hiddenInputChecked
+            hiddenInputChecked: hiddenInputChecked,
+            roleCandidate: roleCandidate,
+            label: label,
+            selector: selector
         });
     }
     return results;
@@ -865,6 +961,27 @@ async fn find_cursor_interactive_elements(
             .trim()
             .to_string();
 
+        let tag_name = elem
+            .get("tagName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let role_candidate = elem
+            .get("roleCandidate")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let label = elem
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let selector = elem
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let hidden_input_kind = elem
             .get("hiddenInputType")
             .and_then(|v| v.as_str())
@@ -883,6 +1000,10 @@ async fn find_cursor_interactive_elements(
                     text,
                     hidden_input_kind,
                     hidden_input_checked,
+                    tag_name,
+                    role_candidate,
+                    label,
+                    selector,
                 },
             );
         }
