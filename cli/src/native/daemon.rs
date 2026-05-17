@@ -399,26 +399,18 @@ async fn handle_connection<S>(
                     let _ = tx.try_send(());
                 }
 
-                let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                let is_close = action == "close";
-                eprintln!("[daemon] cmd: {}", action);
+                let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
 
                 let response = {
                     let mut s = state.lock().await;
-                    eprintln!("[daemon] lock acquired for: {}", action);
-                    let resp = execute_command(&cmd, &mut s).await;
-                    eprintln!("[daemon] executed: {} ok={}", action, resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
-                    resp
+                    execute_command(&cmd, &mut s).await
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
-                eprintln!("[daemon] sending response ({} bytes)", resp.len());
                 if writer.write_all(resp.as_bytes()).await.is_err() {
-                    eprintln!("[daemon] write failed, breaking");
                     break;
                 }
-                eprintln!("[daemon] response sent for: {}", action);
 
                 if is_close {
                     if let Some(ref path) = stream_file_cleanup {

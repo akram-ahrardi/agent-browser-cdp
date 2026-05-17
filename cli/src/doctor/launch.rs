@@ -72,7 +72,6 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         session_name: None,
         download_path: None,
         allowed_domains: None,
-        detach: false,
         action_policy: None,
         confirm_actions: None,
         engine: None,
