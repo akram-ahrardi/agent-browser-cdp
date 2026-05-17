@@ -2741,7 +2741,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.click(selector).await?;
+            wb.click(&selector).await?;
             return Ok(json!({ "clicked": selector }));
         }
     }
@@ -2757,7 +2757,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &mgr.client,
             &session_id,
             &state.ref_map,
-            selector,
+            &selector,
             &state.iframe_sessions,
         )
         .await?;
@@ -2800,7 +2800,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &mgr.client,
         &session_id,
         &state.ref_map,
-        selector,
+        &selector,
         button,
         click_count,
         &state.iframe_sessions,
@@ -2842,7 +2842,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.fill(selector, value).await?;
+            wb.fill(&selector, value).await?;
             return Ok(json!({ "filled": selector }));
         }
     }
@@ -2854,7 +2854,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mgr.client,
         &session_id,
         &state.ref_map,
-        selector,
+        &selector,
         value,
         &state.iframe_sessions,
     )
