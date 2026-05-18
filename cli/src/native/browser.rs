@@ -1685,6 +1685,7 @@ fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
 }
 
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
+    let input = input.trim();
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
