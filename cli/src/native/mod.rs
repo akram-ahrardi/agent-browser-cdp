@@ -13,6 +13,8 @@ pub mod element;
 #[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]
+pub mod network;
+#[allow(dead_code)]
 pub mod interaction;
 #[allow(dead_code)]
 pub mod providers;

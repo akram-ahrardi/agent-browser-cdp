@@ -809,151 +809,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Inspect ===
         "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
 
-        // === Authentication Vault ===
-        "auth" => {
-            let sub = rest.first().map(|s| s.as_ref());
-            match sub {
-                Some("save") => {
-                    let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
-                    })?;
-
-                    let mut url = None;
-                    let mut username = None;
-                    let mut password = None;
-                    let mut password_stdin = false;
-                    let mut username_selector = None;
-                    let mut password_selector = None;
-                    let mut submit_selector = None;
-
-                    let mut j = 2;
-                    while j < rest.len() {
-                        match rest[j] {
-                            "--url" => {
-                                url = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            "--username" => {
-                                username = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            "--password" => {
-                                password = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            "--password-stdin" => {
-                                password_stdin = true;
-                            }
-                            "--username-selector" => {
-                                username_selector = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            "--password-selector" => {
-                                password_selector = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            "--submit-selector" => {
-                                submit_selector = rest.get(j + 1).cloned();
-                                j += 1;
-                            }
-                            other => {
-                                if other.starts_with("--") {
-                                    return Err(ParseError::InvalidValue {
-                                        message: format!("unknown flag '{}' for auth save", other),
-                                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
-                                    });
-                                }
-                            }
-                        }
-                        j += 1;
-                    }
-
-                    let url_val = url.ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
-                    })?;
-                    let user_val = username.ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
-                    })?;
-
-                    if !password_stdin && password.is_none() {
-                        return Err(ParseError::MissingArguments {
-                            context: "auth save".to_string(),
-                            usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
-                        });
-                    }
-
-                    let mut cmd = json!({
-                        "id": id,
-                        "action": "auth_save",
-                        "name": name,
-                        "url": url_val,
-                        "username": user_val,
-                    });
-                    if password_stdin {
-                        cmd["passwordStdin"] = json!(true);
-                    }
-                    if let Some(pass_val) = password {
-                        cmd["password"] = json!(pass_val);
-                    }
-                    if let Some(us) = username_selector {
-                        cmd["usernameSelector"] = json!(us);
-                    }
-                    if let Some(ps) = password_selector {
-                        cmd["passwordSelector"] = json!(ps);
-                    }
-                    if let Some(ss) = submit_selector {
-                        cmd["submitSelector"] = json!(ss);
-                    }
-                    Ok(cmd)
-                }
-                Some("login") => {
-                    let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth login".to_string(),
-                        usage: "agent-browser auth login <name>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "auth_login", "name": name }))
-                }
-                Some("list") => Ok(json!({ "id": id, "action": "auth_list" })),
-                Some("delete") | Some("remove") => {
-                    let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth delete".to_string(),
-                        usage: "agent-browser auth delete <name>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "auth_delete", "name": name }))
-                }
-                Some("show") => {
-                    let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth show".to_string(),
-                        usage: "agent-browser auth show <name>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "auth_show", "name": name }))
-                }
-                _ => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.unwrap_or("(none)").to_string(),
-                    valid_options: &["save", "login", "list", "delete", "show"],
-                }),
-            }
-        }
-
-        // === Action Confirmation ===
-        "confirm" => {
-            let cid = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "confirm".to_string(),
-                usage: "agent-browser confirm <confirmation-id>",
-            })?;
-            Ok(json!({ "id": id, "action": "confirm", "confirmationId": cid }))
-        }
-        "deny" => {
-            let cid = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "deny".to_string(),
-                usage: "agent-browser deny <confirmation-id>",
-            })?;
-            Ok(json!({ "id": id, "action": "deny", "confirmationId": cid }))
-        }
-
         // === Connect (CDP) ===
         "connect" => {
             let endpoint = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1000,62 +855,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
-        // === Runtime stream control ===
-        "stream" => match rest.first().copied() {
-            Some("enable") => {
-                let mut cmd = json!({ "id": id, "action": "stream_enable" });
-                let mut i = 1;
-                while i < rest.len() {
-                    match rest[i] {
-                        "--port" => {
-                            let value =
-                                rest.get(i + 1)
-                                    .ok_or_else(|| ParseError::MissingArguments {
-                                        context: "stream enable --port".to_string(),
-                                        usage: "stream enable [--port <port>]",
-                                    })?;
-                            let port =
-                                value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
-                                    message: format!(
-                                        "Invalid port: '{}' is not a valid integer",
-                                        value
-                                    ),
-                                    usage: "stream enable [--port <port>]",
-                                })?;
-                            if port > u16::MAX as u32 {
-                                return Err(ParseError::InvalidValue {
-                                    message: format!(
-                                        "Invalid port: {} is out of range (valid range: 0-65535)",
-                                        port
-                                    ),
-                                    usage: "stream enable [--port <port>]",
-                                });
-                            }
-                            cmd["port"] = json!(port);
-                            i += 2;
-                        }
-                        flag => {
-                            return Err(ParseError::InvalidValue {
-                                message: format!("Unknown flag for stream enable: {}", flag),
-                                usage: "stream enable [--port <port>]",
-                            });
-                        }
-                    }
-                }
-                Ok(cmd)
-            }
-            Some("disable") => Ok(json!({ "id": id, "action": "stream_disable" })),
-            Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
-            Some(sub) => Err(ParseError::UnknownSubcommand {
-                subcommand: sub.to_string(),
-                valid_options: &["enable", "disable", "status"],
-            }),
-            None => Err(ParseError::MissingArguments {
-                context: "stream".to_string(),
-                usage: "stream <enable|disable|status>",
-            }),
-        },
-
         // === Get ===
         "get" => parse_get(&rest, &id),
 
@@ -1070,9 +869,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Set (browser settings) ===
         "set" => parse_set(&rest, &id),
-
-        // === Network ===
-        "network" => parse_network(&rest, &id),
 
         // === Storage ===
         "storage" => parse_storage(&rest, &id),
@@ -1349,119 +1145,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
-        // === Debug ===
-        "trace" => {
-            const VALID: &[&str] = &["start", "stop"];
-            match rest.first().copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "trace_stop" });
-                    if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "trace".to_string(),
-                    usage: "trace <start|stop> [path]",
-                }),
-            }
-        }
-
-        // === Profiler (CDP Tracing / Chromium profiling) ===
-        "profiler" => {
-            const VALID: &[&str] = &["start", "stop"];
-            match rest.first().copied() {
-                Some("start") => {
-                    let mut cmd = json!({ "id": id, "action": "profiler_start" });
-                    if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
-                        if let Some(cats) = rest.get(idx + 1) {
-                            let categories: Vec<&str> = cats.split(',').collect();
-                            cmd["categories"] = json!(categories);
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "profiler start --categories".to_string(),
-                                usage: "--categories <list>",
-                            });
-                        }
-                    }
-                    Ok(cmd)
-                }
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
-                    if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "profiler".to_string(),
-                    usage: "profiler <start|stop> [options]",
-                }),
-            }
-        }
-
-        // === Recording (browser video recording) ===
-        "record" => {
-            const VALID: &[&str] = &["start", "stop", "restart"];
-            match rest.first().copied() {
-                Some("start") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record start".to_string(),
-                        usage: "record start <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
-                Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
-                Some("restart") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record restart".to_string(),
-                        usage: "record restart <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "record".to_string(),
-                    usage: "record <start|stop|restart> [path] [url]",
-                }),
-            }
-        }
         "console" => {
             let clear = rest.contains(&"--clear");
             Ok(json!({ "id": id, "action": "console", "clear": clear }))
@@ -1498,126 +1181,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 valid_options: &["read", "write", "copy", "paste"],
             }),
         },
-
-        // === State ===
-        "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
-            match rest.first().copied() {
-                Some("save") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state save".to_string(),
-                        usage: "state save <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
-                }
-                Some("load") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state load".to_string(),
-                        usage: "state load <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
-                }
-                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
-                Some("clear") => {
-                    let mut session_name: Option<&str> = None;
-                    let mut all = false;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        match rest[i] {
-                            "--all" | "-a" => {
-                                all = true;
-                            }
-                            arg if !arg.starts_with('-') => {
-                                session_name = Some(arg);
-                            }
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-
-                    if let Some(name) = session_name {
-                        if !is_valid_session_name(name) {
-                            return Err(ParseError::InvalidSessionName {
-                                name: name.to_string(),
-                            });
-                        }
-                    }
-
-                    let mut cmd = json!({ "id": id, "action": "state_clear" });
-                    if all {
-                        cmd["all"] = json!(true);
-                    }
-                    if let Some(name) = session_name {
-                        cmd["sessionName"] = json!(name);
-                    }
-                    Ok(cmd)
-                }
-                Some("show") => {
-                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state show".to_string(),
-                        usage: "state show <filename>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
-                }
-                Some("clean") => {
-                    let mut days: Option<i64> = None;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        if rest[i] == "--older-than" {
-                            if let Some(d) = rest.get(i + 1) {
-                                days = d.parse().ok();
-                                i += 1;
-                            }
-                        }
-                        i += 1;
-                    }
-
-                    let days = days.ok_or_else(|| ParseError::MissingArguments {
-                        context: "state clean".to_string(),
-                        usage: "state clean --older-than <days>",
-                    })?;
-
-                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
-                }
-                Some("rename") => {
-                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let old_name = old_name.trim_end_matches(".json");
-                    let new_name = new_name.trim_end_matches(".json");
-
-                    if !is_valid_session_name(old_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: old_name.to_string(),
-                        });
-                    }
-                    if !is_valid_session_name(new_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: new_name.to_string(),
-                        });
-                    }
-
-                    Ok(
-                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
-                    )
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "state".to_string(),
-                    usage: "state <save|load|list|clear|show|clean|rename> ...",
-                }),
-            }
-        }
 
         // === iOS-specific commands ===
         "tap" => {
@@ -1663,8 +1226,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
-        "diff" => parse_diff(&rest, &id),
-
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
@@ -1674,40 +1235,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 cmd["commands"] = json!(commands);
             }
             Ok(cmd)
-        }
-
-        // === React (requires `open --enable react-devtools`) ===
-        "react" => parse_react(&rest, &id),
-
-        // === Core Web Vitals + hydration ===
-        "vitals" | "web-vitals" => {
-            let mut cmd = json!({ "id": id, "action": "vitals" });
-            let json_out = rest.contains(&"--json");
-            if json_out {
-                cmd["json"] = json!(true);
-            }
-            if let Some(url) = rest.iter().find(|a| !a.starts_with("--")) {
-                cmd["url"] = json!(url);
-            }
-            Ok(cmd)
-        }
-
-        // === SPA client-side navigation ===
-        "pushstate" => {
-            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "pushstate".to_string(),
-                usage: "pushstate <url>",
-            })?;
-            Ok(json!({ "id": id, "action": "pushstate", "url": url }))
-        }
-
-        // === Remove init script ===
-        "removeinitscript" => {
-            let identifier = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "removeinitscript".to_string(),
-                usage: "removeinitscript <identifier>",
-            })?;
-            Ok(json!({ "id": id, "action": "removeinitscript", "identifier": identifier }))
         }
 
         _ => Err(ParseError::UnknownCommand {
@@ -2941,25 +2468,6 @@ mod tests {
         assert_eq!(cmd["action"], "react_suspense");
         assert_eq!(cmd["onlyDynamic"], true);
         assert_eq!(cmd["json"], true);
-    }
-
-    #[test]
-    fn test_vitals_command() {
-        let cmd = parse_command(&args("vitals"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "vitals");
-        let cmd = parse_command(
-            &args("vitals http://localhost:3000/dashboard"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(cmd["url"], "http://localhost:3000/dashboard");
-    }
-
-    #[test]
-    fn test_pushstate_command() {
-        let cmd = parse_command(&args("pushstate /foo"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "pushstate");
-        assert_eq!(cmd["url"], "/foo");
     }
 
     #[test]
@@ -4492,47 +4000,8 @@ mod tests {
         assert_eq!(cmd["cdpPort"], 1);
     }
 
-    // === Runtime stream control tests ===
-
-    #[test]
-    fn test_stream_enable_auto_port() {
-        let cmd = parse_command(&args("stream enable"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "stream_enable");
-        assert!(cmd.get("port").is_none());
-    }
-
-    #[test]
-    fn test_stream_enable_with_port() {
-        let cmd = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "stream_enable");
-        assert_eq!(cmd["port"], 9223);
-    }
-
-    #[test]
-    fn test_stream_status() {
-        let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "stream_status");
-    }
-
-    #[test]
-    fn test_stream_disable() {
-        let cmd = parse_command(&args("stream disable"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "stream_disable");
-    }
-
-    #[test]
-    fn test_stream_enable_invalid_port() {
-        let result = parse_command(&args("stream enable --port abc"), &default_flags());
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
-    }
-
-    #[test]
-    fn test_stream_missing_subcommand() {
-        let result = parse_command(&args("stream"), &default_flags());
-        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
-    }
-
     // === Trace Tests ===
+
 
     #[test]
     fn test_trace_start() {

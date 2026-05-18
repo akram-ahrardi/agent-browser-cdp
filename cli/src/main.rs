@@ -499,15 +499,10 @@ fn main() {
         return;
     }
 
-    // Standalone dashboard server mode
+    // Standalone dashboard server mode (removed — stream module not available)
     if env::var("AGENT_BROWSER_DASHBOARD").is_ok() {
-        let port: u16 = env::var("AGENT_BROWSER_DASHBOARD_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4848);
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(native::stream::run_dashboard_server(port));
-        return;
+        eprintln!("Error: The dashboard server is not available in this build.");
+        std::process::exit(1);
     }
 
     let args: Vec<String> = env::args().skip(1).collect();

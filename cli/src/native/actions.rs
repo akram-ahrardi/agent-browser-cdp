@@ -4,59 +4,35 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, RwLock};
 
 use crate::connection::get_socket_dir;
 
-use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent,
     DispatchMouseEventParams, ExceptionThrownEvent, JavascriptDialogOpeningEvent,
     TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
 };
 use super::cookies;
-use super::diff;
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
-use super::network::{self, DomainFilter, EventTracker};
-use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
+use super::network::{self, EventTracker};
 use super::providers;
-use super::react;
-use super::recording::{self, RecordingState};
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
-use super::stream::{self, StreamServer};
-use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
 use super::webdriver::ios;
 use super::webdriver::safari;
 
-/// Wait strategy used by `auth_login` when navigating to the login page.
-///
-/// We intentionally use `Load` (instead of `NetworkIdle`) because many modern
-/// apps keep background requests active indefinitely (polling, analytics,
-/// websockets), which can prevent network-idle from ever resolving.
-///
-/// After navigation completes, `auth_login` explicitly waits for form selectors
-/// to appear before filling/clicking.
-pub const AUTH_LOGIN_WAIT_UNTIL: WaitUntil = WaitUntil::Load;
-
-/// Poll interval used while waiting for auth form selectors to appear.
-const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
-
-/// Time spent trying targeted username selectors before broad text-input
-/// fallback selectors are allowed.
-const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
 pub struct PendingConfirmation {
     pub action: String,
@@ -206,19 +182,13 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
-    pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
     pub session_id: String,
-    pub tracing_state: TracingState,
-    pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub screencasting: bool,
-    pub policy: Option<ActionPolicy>,
-    pub pending_confirmation: Option<PendingConfirmation>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
-    pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
     pub tracked_requests: Vec<TrackedRequest>,
@@ -247,10 +217,7 @@ pub struct DaemonState {
     /// When true, automatically dismiss `beforeunload` dialogs and accept `alert`
     /// dialogs so they never block the agent.  Enabled by default.
     pub auto_dialog: bool,
-    /// Shared slot for stream server to receive CDP client when browser launches.
-    pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
-    /// Stream server instance kept alive so the broadcast channel remains open.
-    pub stream_server: Option<Arc<StreamServer>>,
+    pub pending_confirmation: Option<PendingConfirmation>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
@@ -271,24 +238,14 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
-            domain_filter: Arc::new(RwLock::new(
-                env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| DomainFilter::new(&s)),
-            )),
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
-            tracing_state: TracingState::new(),
-            recording_state: RecordingState::new(),
             event_rx: None,
             screencasting: false,
-            policy: ActionPolicy::load_if_exists(),
             pending_confirmation: None,
             har_recording: false,
             har_entries: Vec::new(),
-            confirm_actions: ConfirmActions::from_env(),
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
             tracked_requests: Vec::new(),
@@ -305,8 +262,6 @@ impl DaemonState {
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
                 Ok("1" | "true" | "yes")
             ),
-            stream_client: None,
-            stream_server: None,
             launch_hash: None,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
             default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
@@ -331,21 +286,6 @@ impl DaemonState {
         self.mouse_state = MouseState::default();
     }
 
-    /// Create state with an optional stream client slot and server instance
-    /// (for daemon startup with stream server).
-    pub fn new_with_stream(
-        stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
-        stream_server: Option<Arc<StreamServer>>,
-    ) -> Self {
-        let mut s = Self::new();
-        if stream_server.is_some() {
-            s.request_tracking = true;
-        }
-        s.stream_client = stream_client;
-        s.stream_server = stream_server;
-        s
-    }
-
     fn subscribe_to_browser_events(&mut self) {
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
@@ -368,7 +308,6 @@ impl DaemonState {
 
         let client = browser.client.clone();
         let mut rx = browser.client.subscribe();
-        let domain_filter = self.domain_filter.clone();
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
@@ -451,11 +390,10 @@ impl DaemonState {
                             request_headers,
                         };
 
-                        let df = domain_filter.read().await;
                         let rt = routes.read().await;
                         let oh = origin_headers.read().await;
 
-                        resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
+                        resolve_fetch_paused(&client, &rt, &oh, &paused).await;
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -525,61 +463,6 @@ impl DaemonState {
     }
 
     /// Update the stream server's CDP client slot when browser is set or cleared.
-    pub async fn update_stream_client(&self) {
-        if let Some(ref slot) = self.stream_client {
-            let mut guard = slot.write().await;
-            *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
-        }
-        if let Some(ref server) = self.stream_server {
-            // Update the CDP page session ID so screencast commands target the right page
-            let session_id = self
-                .browser
-                .as_ref()
-                .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-            server.set_cdp_session_id(session_id).await;
-
-            // Broadcast connection status change to WebSocket clients
-            let connected = self.browser.is_some();
-            let sc = server.is_screencasting().await;
-            let (vw, vh) = server.viewport().await;
-            server
-                .broadcast_status(connected, sc, vw, vh, &self.engine)
-                .await;
-            if let Some(ref mgr) = self.browser {
-                server.broadcast_tabs(&mgr.tab_list()).await;
-            } else {
-                server.broadcast_tabs(&[]).await;
-            }
-            // Notify the background CDP event loop that the client changed
-            server.notify_client_changed();
-        }
-    }
-
-    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
-    async fn start_recording_task(
-        &mut self,
-        client: Arc<CdpClient>,
-        session_id: String,
-    ) -> Result<(), String> {
-        let shared_count = Arc::new(AtomicU64::new(0));
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        let handle = recording::spawn_recording_task(
-            client,
-            session_id,
-            self.recording_state.output_path.clone(),
-            shared_count.clone(),
-            cancel_rx,
-        );
-        self.recording_state.capture_task = Some(handle);
-        self.recording_state.shared_frame_count = Some(shared_count);
-        self.recording_state.cancel_tx = Some(cancel_tx);
-        Ok(())
-    }
-
-    async fn stop_recording_task(&mut self) -> Result<(), String> {
-        recording::stop_recording_task(&mut self.recording_state).await
-    }
-
     pub async fn drain_cdp_events_background(&mut self) {
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await;
@@ -591,7 +474,12 @@ impl DaemonState {
             if let Some(ref browser) = self.browser {
                 if let Ok(session_id) = browser.active_session_id() {
                     for ack_sid in drained.pending_acks {
-                        let _ = stream::ack_screencast_frame(&browser.client, session_id, ack_sid)
+                        let _ = browser.client
+                            .send_command(
+                                "Page.screencastFrameAck",
+                                Some(json!({ "sessionId": ack_sid })),
+                                Some(session_id),
+                            )
                             .await;
                     }
                 }
@@ -653,19 +541,6 @@ impl DaemonState {
                     .await;
                 if let Ok(attach) = attach_result {
                     let _ = mgr.enable_domains_pub(&attach.session_id).await;
-
-                    // Install domain filter on new pages
-                    let df = self.domain_filter.read().await;
-                    if let Some(ref filter) = *df {
-                        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-                        let _ = network::install_domain_filter(
-                            &mgr.client,
-                            &attach.session_id,
-                            &filter.allowed_domains,
-                            has_proxy_creds,
-                        )
-                        .await;
-                    }
 
                     let tab_id = mgr.assign_tab_id();
                     mgr.add_page(super::browser::PageInfo {
@@ -827,9 +702,6 @@ impl DaemonState {
                                 .cloned()
                                 .unwrap_or_default();
                             let text = network::format_console_args(&raw_args);
-                            if let Some(ref server) = self.stream_server {
-                                server.broadcast_console(level, &text, &raw_args);
-                            }
                             self.event_tracker.add_console(level, &text, raw_args);
                         }
                         "Runtime.exceptionThrown" => {
@@ -848,13 +720,6 @@ impl DaemonState {
                                     details.line_number,
                                     details.column_number,
                                 );
-                                if let Some(ref server) = self.stream_server {
-                                    server.broadcast_page_error(
-                                        text,
-                                        details.line_number,
-                                        details.column_number,
-                                    );
-                                }
                             }
                         }
                         "Network.requestWillBeSent"
@@ -1072,10 +937,7 @@ impl DaemonState {
                                 }
                             }
                         }
-                        // Frame broadcasting and acks are handled in real-time by the
-                        // stream server's background CDP event loop. Here we just
-                        // collect acks as a fallback for non-streaming mode.
-                        "Page.screencastFrame" if self.stream_server.is_none() => {
+                        "Page.screencastFrame" => {
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_i64())
                             {
@@ -1158,60 +1020,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .unwrap_or("")
         .to_string();
 
-    let cmd_start = std::time::Instant::now();
-
-    if let Some(ref server) = state.stream_server {
-        server.broadcast_command(action, &id, cmd);
-    }
 
     // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
     state.drain_cdp_events_background().await;
-
-    // Hot-reload and check action policy
-    if let Some(ref mut policy) = state.policy {
-        let _ = policy.reload();
-        match policy.check(action) {
-            PolicyResult::Allow => {}
-            PolicyResult::Deny(reason) => {
-                return error_response(
-                    &id,
-                    &format!("Action '{}' denied by policy: {}", action, reason),
-                );
-            }
-            PolicyResult::RequiresConfirmation => {
-                state.pending_confirmation = Some(PendingConfirmation {
-                    action: action.to_string(),
-                    cmd: cmd.clone(),
-                });
-                return json!({
-                    "id": id,
-                    "success": true,
-                    "data": { "confirmation_required": true, "action": action },
-                });
-            }
-        }
-    }
-
-    // Check AGENT_BROWSER_CONFIRM_ACTIONS (category-based, independent of policy file)
-    if action != "confirm" && action != "deny" {
-        if let Some(ref ca) = state.confirm_actions {
-            if ca.requires_confirmation(action) {
-                state.pending_confirmation = Some(PendingConfirmation {
-                    action: action.to_string(),
-                    cmd: cmd.clone(),
-                });
-                return json!({
-                    "id": id,
-                    "success": true,
-                    "data": {
-                        "confirmation_required": true,
-                        "confirmation_id": id,
-                        "action": action,
-                    },
-                });
-            }
-        }
-    }
 
     let skip_launch = matches!(
         action,
@@ -1222,19 +1033,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             | "credentials_get"
             | "credentials_delete"
             | "credentials_list"
-            | "auth_save"
-            | "auth_show"
-            | "auth_delete"
-            | "auth_list"
             | "state_list"
             | "state_show"
             | "state_clear"
             | "state_clean"
             | "state_rename"
             | "device_list"
-            | "stream_enable"
-            | "stream_disable"
-            | "stream_status"
     );
     if !skip_launch {
         // Check if existing connection is stale and needs re-launch.
@@ -1254,7 +1058,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 state.browser = None;
                 state.screencasting = false;
                 state.reset_input_state();
-                state.update_stream_client().await;
             }
             if let Err(e) = auto_launch(state).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
@@ -1359,8 +1162,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "addinitscript" => handle_addinitscript(cmd, state).await,
         "removeinitscript" => handle_removeinitscript(cmd, state).await,
         "addstyle" => handle_addstyle(cmd, state).await,
-        "vitals" => handle_vitals(cmd, state).await,
-        "pushstate" => handle_pushstate(cmd, state).await,
         "wheel" => handle_wheel(cmd, state).await,
         "waitforurl" => handle_waitforurl(cmd, state).await,
         "waitforloadstate" => handle_waitforloadstate(cmd, state).await,
@@ -1399,31 +1200,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    if let Some(ref server) = state.stream_server {
-        let duration_ms = cmd_start.elapsed().as_millis() as u64;
-        let success = resp
-            .get("status")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s == "success");
-        let data = resp.get("data").cloned().unwrap_or(Value::Null);
-        server.broadcast_result(&id, action, success, &data, duration_ms);
-
-        if let Some(ref mgr) = state.browser {
-            server.broadcast_tabs(&mgr.tab_list()).await;
-
-            // Keep the stream server's CDP session in sync with the active tab
-            // so screencasting always targets the correct page.
-            if matches!(
-                action,
-                "tab_new" | "tab_switch" | "tab_close" | "open" | "navigate"
-            ) {
-                let session_id = mgr.active_session_id().ok().map(|s| s.to_string());
-                server.set_cdp_session_id(session_id).await;
-                server.notify_client_changed();
-            }
-        }
-    }
-
     resp
 }
 
@@ -1450,11 +1226,6 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let mut options = launch_options_from_env();
 
-    // Use the stream server's viewport dimensions for --window-size so the
-    // content area matches the desired viewport from the start.
-    if let Some(ref server) = state.stream_server {
-        options.viewport_size = Some(server.viewport().await);
-    }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 
     // Extract storage_state before options is moved into BrowserManager::launch.
@@ -1481,7 +1252,6 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        state.update_stream_client().await;
         apply_launch_init_scripts(state).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
@@ -1494,7 +1264,6 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        state.update_stream_client().await;
         apply_launch_init_scripts(state).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
@@ -1529,7 +1298,6 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
-                    state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
                     apply_launch_init_scripts(state).await;
                     try_auto_restore_state(state).await;
@@ -1554,13 +1322,18 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
-    state.update_stream_client().await;
 
     // Enable Fetch with handleAuthRequests for proxy authentication
     if has_proxy_auth {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                let _ = network::install_domain_filter_fetch(&mgr.client, session_id, true).await;
+                let _ = mgr.client
+                    .send_command(
+                        "Fetch.enable",
+                        Some(json!({ "patterns": [{ "urlPattern": "*" }], "handleAuthRequests": true })),
+                        Some(session_id),
+                    )
+                    .await;
             }
         }
     }
@@ -1589,9 +1362,6 @@ async fn apply_launch_init_scripts(state: &DaemonState) {
             .filter(|s| !s.is_empty())
         {
             match feature {
-                "react-devtools" | "react" => {
-                    let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
-                }
                 other => {
                     eprintln!("warning: unknown --enable feature '{}'", other);
                 }
@@ -1703,7 +1473,6 @@ async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
     state.screencasting = false;
     state.reset_input_state();
     state.ref_map.clear();
-    state.update_stream_client().await;
 
     if let Some(err) = close_error {
         return Err(err);
@@ -1855,7 +1624,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.launch_hash = None;
             state.screencasting = false;
             state.reset_input_state();
-            state.update_stream_client().await;
         }
     } else {
         load_storage_state(state, &storage_state_owned).await?;
@@ -1879,7 +1647,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        state.update_stream_client().await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -1891,7 +1658,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        state.update_stream_client().await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -1903,7 +1669,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        state.update_stream_client().await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -1940,7 +1705,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
-                        state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
                         load_storage_state_or_rollback(state, &storage_state_owned).await?;
                         apply_launch_init_scripts(state).await;
@@ -1983,15 +1747,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         ));
     }
 
-    if let Some(ref domains) = cmd
-        .get("allowedDomains")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-    {
-        let mut df = state.domain_filter.write().await;
-        *df = Some(DomainFilter::new(domains));
-    }
-
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file(&state.session_id);
@@ -2001,37 +1756,18 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
-    state.update_stream_client().await;
 
-    // Enable Fetch interception (domain filtering and/or proxy auth).
-    // Only call Fetch.enable once to avoid overwriting handleAuthRequests.
-    {
-        let df = state.domain_filter.read().await;
-        let has_domain_filter = df.is_some();
-
-        if has_domain_filter || has_proxy_auth {
-            if let Some(ref mgr) = state.browser {
-                if let Ok(session_id) = mgr.active_session_id() {
-                    if let Some(ref filter) = *df {
-                        let _ = network::install_domain_filter(
-                            &mgr.client,
-                            session_id,
-                            &filter.allowed_domains,
-                            has_proxy_auth,
-                        )
-                        .await;
-                        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
-                            .await;
-                    } else {
-                        // No domain filter, but proxy auth needs Fetch.enable
-                        let _ = network::install_domain_filter_fetch(
-                            &mgr.client,
-                            session_id,
-                            has_proxy_auth,
-                        )
-                        .await;
-                    }
-                }
+    // Enable Fetch interception for proxy auth if needed.
+    if has_proxy_auth {
+        if let Some(ref mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id() {
+                let _ = mgr.client
+                    .send_command(
+                        "Fetch.enable",
+                        Some(json!({ "patterns": [{ "urlPattern": "*" }], "handleAuthRequests": true })),
+                        Some(session_id),
+                    )
+                    .await;
             }
         }
     }
@@ -2142,13 +1878,6 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
-
-    {
-        let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            filter.check_url(url)?;
-        }
-    }
 
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
@@ -2348,7 +2077,6 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     state.launch_hash = None;
     state.screencasting = false;
     state.reset_input_state();
-    state.update_stream_client().await;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -3538,24 +3266,6 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     state.active_frame_id = None;
     let result = mgr.tab_switch_by_id(tab_id).await?;
 
-    if let Some(ref server) = state.stream_server {
-        if let Ok(dims) = mgr
-            .evaluate(
-                "JSON.stringify([window.innerWidth,window.innerHeight])",
-                None,
-            )
-            .await
-        {
-            if let Some(s) = dims.get("result").and_then(|v| v.as_str()) {
-                if let Ok(arr) = serde_json::from_str::<Vec<u32>>(s) {
-                    if arr.len() == 2 && arr[0] > 0 && arr[1] > 0 {
-                        server.set_viewport(arr[0], arr[1]).await;
-                    }
-                }
-            }
-        }
-    }
-
     Ok(result)
 }
 
@@ -3587,11 +3297,6 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.set_viewport(width, height, scale, mobile).await?;
 
     state.viewport = Some((width, height, scale, mobile));
-
-    // Update stream server viewport so status messages and screencast use the new dimensions
-    if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
-    }
 
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
 }
@@ -4212,153 +3917,7 @@ fn parse_json_string(value: Value, what: &str) -> Result<Value, String> {
 
 
 
-async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    // Install observers BEFORE the navigation/reload that we want to measure.
-    // The script is idempotent — a no-op if already installed on the current page.
-    {
-        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        let _ = mgr.evaluate(react::scripts::VITALS_INIT, None).await?;
-    }
 
-    // Register as an init script too, so navigations done via `vitals --url`
-    // start observing from the first paint.
-    {
-        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        let _ = mgr
-            .add_script_to_evaluate(react::scripts::VITALS_INIT)
-            .await;
-    }
-
-    // Navigate to the target URL (or reload the current page) to trigger a
-    // full page load the observers can capture.
-    let target = cmd.get("url").and_then(|v| v.as_str()).map(String::from);
-    if let Some(url) = target {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        let _ = mgr.navigate(&url, WaitUntil::Load).await?;
-    } else {
-        handle_reload(state).await?;
-    }
-
-    // Give layout shifts and React effects a chance to settle.
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = mgr.get_url().await.unwrap_or_default();
-    let result = mgr.evaluate(react::scripts::VITALS_READ, None).await?;
-    let raw = parse_json_string(result, "vitals")?;
-
-    // The raw payload has { cwv, timing, ttfb }. Merge with URL and process
-    // timing into React hydration phases + per-component durations.
-    let cwv = raw.get("cwv").cloned().unwrap_or(json!({}));
-    let timing = raw
-        .get("timing")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let ttfb = raw.get("ttfb").and_then(|v| v.as_f64());
-    let lcp = cwv.get("lcp").cloned().unwrap_or(Value::Null);
-    let cls_score = cwv.get("cls").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let cls_entries = cwv.get("clsEntries").cloned().unwrap_or(json!([]));
-    let fcp = cwv.get("fcp").and_then(|v| v.as_f64());
-    let inp = cwv.get("inp").and_then(|v| v.as_f64());
-
-    let round = |n: f64| (n * 100.0).round() / 100.0;
-
-    let mut hydration_phases: Vec<Value> = Vec::new();
-    let mut hydration_start = f64::INFINITY;
-    let mut hydration_end = 0.0f64;
-    let mut hydrated_components: Vec<Value> = Vec::new();
-    // React's profiling build emits `console.timeStamp(label, start, end,
-    // track, trackGroup, color)` entries whose `track` / `trackGroup`
-    // fields are literal strings containing the atom glyph (e.g.
-    // "Scheduler ⚛", "Components ⚛"). The comparisons below match those
-    // exact strings — don't "clean up" the glyphs.
-    for e in &timing {
-        let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("");
-        let track = e.get("track").and_then(|v| v.as_str()).unwrap_or("");
-        let track_group = e.get("trackGroup").and_then(|v| v.as_str()).unwrap_or("");
-        let color = e.get("color").and_then(|v| v.as_str()).unwrap_or("");
-        let start = e.get("startTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let end = e.get("endTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        if end <= start {
-            continue;
-        }
-        if track_group == "Scheduler ⚛" {
-            hydration_phases.push(json!({
-                "label": label,
-                "startTime": round(start),
-                "endTime": round(end),
-                "duration": round(end - start),
-            }));
-            if label == "Hydrated" {
-                if start < hydration_start {
-                    hydration_start = start;
-                }
-                if end > hydration_end {
-                    hydration_end = end;
-                }
-            }
-        } else if track == "Components ⚛" && color.starts_with("tertiary") {
-            hydrated_components.push(json!({
-                "name": label,
-                "startTime": round(start),
-                "endTime": round(end),
-                "duration": round(end - start),
-            }));
-        }
-    }
-    hydrated_components.sort_by(|a, b| {
-        let da = a.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let db = b.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let hydration = if hydration_start.is_finite() && hydration_end > 0.0 {
-        json!({
-            "startTime": round(hydration_start),
-            "endTime": round(hydration_end),
-            "duration": round(hydration_end - hydration_start),
-        })
-    } else {
-        Value::Null
-    };
-
-    let data_value = json!({
-        "url": url,
-        "ttfb": ttfb,
-        "lcp": lcp,
-        "cls": { "score": round(cls_score), "entries": cls_entries },
-        "fcp": fcp,
-        "inp": inp,
-        "hydration": hydration,
-        "phases": hydration_phases,
-        "hydratedComponents": hydrated_components,
-    });
-
-    let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
-    if return_json {
-        Ok(data_value)
-    } else {
-        let data: react::VitalsData = serde_json::from_value(data_value.clone())
-            .map_err(|e| format!("Failed to parse vitals data: {}", e))?;
-        Ok(json!({ "report": react::format_vitals_report(&data) }))
-    }
-}
-
-async fn handle_pushstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = cmd
-        .get("url")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'url' parameter")?;
-    let script = react::scripts::PUSHSTATE.replace(
-        "{{URL}}",
-        &serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string()),
-    );
-    let result = mgr.evaluate(&script, None).await?;
-    let after = result.as_str().map(String::from).unwrap_or_default();
-    Ok(json!({ "url": after }))
-}
 
 async fn handle_addstyle(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
@@ -4500,34 +4059,6 @@ fn write_extensions_file(session_id: &str) {
 
 fn remove_extensions_file(session_id: &str) {
     let _ = fs::remove_file(extensions_file_path(session_id));
-}
-
-async fn current_stream_status(state: &DaemonState) -> Value {
-    debug_assert_eq!(
-        state.stream_server.is_some(),
-        state.stream_client.is_some(),
-        "stream server and stream client slot should be set together"
-    );
-
-    let connected = match state.browser.as_ref() {
-        Some(mgr) => mgr.is_connection_alive().await,
-        None => false,
-    };
-    let runtime_screencasting = match state.stream_server.as_ref() {
-        Some(server) => server.is_screencasting().await,
-        None => false,
-    };
-
-    json!({
-        "enabled": state.stream_server.is_some(),
-        "port": state
-            .stream_server
-            .as_ref()
-            .map(|server| Value::from(server.port()))
-            .unwrap_or(Value::Null),
-        "connected": connected,
-        "screencasting": connected && (state.screencasting || runtime_screencasting),
-    })
 }
 
 
@@ -5595,83 +5126,11 @@ fn browser_metadata_from_version(version: &Value) -> Option<Value> {
 
 async fn resolve_fetch_paused(
     client: &CdpClient,
-    domain_filter: Option<&DomainFilter>,
     routes: &[RouteEntry],
     origin_headers: &HashMap<String, HashMap<String, String>>,
     paused: &FetchPausedRequest,
 ) {
     let session_id = &paused.session_id;
-
-    // Domain filter check (takes priority over routes and origin headers)
-    if let Some(filter) = domain_filter {
-        if let Ok(parsed) = url::Url::parse(&paused.url) {
-            let scheme = parsed.scheme();
-            if scheme != "http" && scheme != "https" {
-                if paused.resource_type.eq_ignore_ascii_case("document") {
-                    let _ = client
-                        .send_command(
-                            "Fetch.failRequest",
-                            Some(json!({
-                                "requestId": paused.request_id,
-                                "errorReason": "BlockedByClient"
-                            })),
-                            Some(session_id),
-                        )
-                        .await;
-                } else {
-                    let _ = client
-                        .send_command(
-                            "Fetch.continueRequest",
-                            Some(json!({ "requestId": paused.request_id })),
-                            Some(session_id),
-                        )
-                        .await;
-                }
-                return;
-            }
-
-            if let Some(hostname) = parsed.host_str() {
-                if !filter.is_allowed(hostname) {
-                    if paused.resource_type.eq_ignore_ascii_case("document") {
-                        let error_body = format!(
-                            "<html><body><h1>Blocked</h1><p>Navigation to {} is not allowed by domain filter.</p></body></html>",
-                            hostname
-                        );
-                        let encoded = base64::Engine::encode(
-                            &base64::engine::general_purpose::STANDARD,
-                            error_body.as_bytes(),
-                        );
-                        let _ = client
-                            .send_command(
-                                "Fetch.fulfillRequest",
-                                Some(json!({
-                                    "requestId": paused.request_id,
-                                    "responseCode": 403,
-                                    "responseHeaders": [
-                                        { "name": "Content-Type", "value": "text/html" },
-                                    ],
-                                    "body": encoded,
-                                })),
-                                Some(session_id),
-                            )
-                            .await;
-                    } else {
-                        let _ = client
-                            .send_command(
-                                "Fetch.failRequest",
-                                Some(json!({
-                                    "requestId": paused.request_id,
-                                    "errorReason": "BlockedByClient"
-                                })),
-                                Some(session_id),
-                            )
-                            .await;
-                    }
-                    return;
-                }
-            }
-        }
-    }
 
     // Route matching
     for route in routes {
@@ -5798,10 +5257,9 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
         .iter()
         .map(|r| json!({ "urlPattern": r.url_pattern }))
         .collect();
-    let has_domain_filter = state.domain_filter.read().await.is_some();
     let has_origin_headers = !state.origin_headers.read().await.is_empty();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    if (has_domain_filter || has_origin_headers || has_proxy_creds)
+    if (has_origin_headers || has_proxy_creds)
         && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
         patterns.push(json!({ "urlPattern": "*" }));
@@ -5938,9 +5396,7 @@ async fn wait_for_any_selector(
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(
-            AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS,
-        ))
+        tokio::time::sleep(tokio::time::Duration::from_millis(100))
         .await;
     }
 }
@@ -6115,10 +5571,7 @@ mod tests {
 
         let state = DaemonState::new();
         assert!(state.browser.is_none());
-        assert!(state.domain_filter.read().await.is_none());
         assert_eq!(state.session_id, "default");
-        assert!(!state.tracing_state.active);
-        assert!(!state.recording_state.active);
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
@@ -6442,24 +5895,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_navigate_without_browser() {
-        let mut state = DaemonState::new();
-        {
-            let mut df = state.domain_filter.write().await;
-            *df = Some(DomainFilter::new("example.com"));
-        }
-        let cmd = json!({
-            "action": "navigate",
-            "url": "https://blocked.com",
-            "id": "test-4"
-        });
-        let result = execute_command(&cmd, &mut state).await;
-        // Will fail because auto-launch fails, but the domain filter won't block since
-        // auto-launch happens first
-        assert_eq!(result["success"], false);
-    }
-
-    #[tokio::test]
     async fn test_state_list_via_actions() {
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "state_list", "id": "s1" });
@@ -6496,18 +5931,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
-        let state = DaemonState::new();
-        {
-            let mut df = state.domain_filter.write().await;
-            *df = Some(super::super::network::DomainFilter::new("example.com"));
-        }
-        let patterns = build_fetch_patterns(&state).await;
-        assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0]["urlPattern"], "*");
-    }
-
-    #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
         let state = DaemonState::new();
         {
@@ -6534,8 +5957,10 @@ mod tests {
             });
         }
         {
-            let mut df = state.domain_filter.write().await;
-            *df = Some(super::super::network::DomainFilter::new("example.com"));
+            let mut oh = state.origin_headers.write().await;
+            let mut headers = HashMap::new();
+            headers.insert("Authorization".to_string(), "Bearer xxx".to_string());
+            oh.insert("http://example.com".to_string(), headers);
         }
         let patterns = build_fetch_patterns(&state).await;
         assert_eq!(
