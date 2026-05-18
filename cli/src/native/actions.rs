@@ -1224,7 +1224,7 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
-    let mut options = launch_options_from_env();
+    let options = launch_options_from_env();
 
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 

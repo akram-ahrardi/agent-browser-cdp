@@ -292,16 +292,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            // --sniff: optional value for target (auto, main, nav, header, footer, aside, layout, #css)
-            if let Some(sniff_val) = rest.iter().find(|&&s| s.starts_with("--sniff")) {
-                if *sniff_val == "--sniff" {
-                    // --sniff without = value → auto
-                    nav_cmd["sniff"] = json!("auto");
-                } else if let Some(eq_pos) = sniff_val.find('=') {
-                    let val = &sniff_val[eq_pos + 1..];
-                    nav_cmd["sniff"] = json!(val);
-                }
-            }
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
@@ -343,16 +333,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 Ok(json!({ "id": id, "action": "click", "selector": sel }))
             }
         }
-        // === State (interactive elements) ===
-        "state" => {
-            let max: usize = rest
-                .iter()
-                .find(|&&s| s.starts_with("--max="))
-                .and_then(|s| s.strip_prefix("--max="))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(50);
-            Ok(json!({ "id": id, "action": "state", "max": max }))
-        }
+
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),
@@ -418,17 +399,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values }))
             }
         }
-        "drag" => {
-            let src = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "drag".to_string(),
-                usage: "drag <source> <target>",
-            })?;
-            let tgt = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "drag".to_string(),
-                usage: "drag <source> <target>",
-            })?;
-            Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
-        }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "upload".to_string(),
@@ -455,20 +425,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 usage: "press <key>",
             })?;
             Ok(json!({ "id": id, "action": "press", "key": key }))
-        }
-        "keydown" => {
-            let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "keydown".to_string(),
-                usage: "keydown <key>",
-            })?;
-            Ok(json!({ "id": id, "action": "keydown", "key": key }))
-        }
-        "keyup" => {
-            let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "keyup".to_string(),
-                usage: "keyup <key>",
-            })?;
-            Ok(json!({ "id": id, "action": "keyup", "key": key }))
         }
         "keyboard" => {
             let sub = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -713,13 +669,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
             Ok(cmd)
         }
-        "pdf" => {
-            let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "pdf".to_string(),
-                usage: "pdf <path>",
-            })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
-        }
 
         // === Snapshot ===
         "snapshot" => {
@@ -809,6 +758,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Inspect ===
         "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
 
+        // === Authentication Vault ===
+
+        // === Action Confirmation ===
+
         // === Connect (CDP) ===
         "connect" => {
             let endpoint = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -855,8 +808,63 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
+        // === Runtime stream control ===
+        "stream" => match rest.first().copied() {
+            Some("enable") => {
+                let mut cmd = json!({ "id": id, "action": "stream_enable" });
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--port" => {
+                            let value =
+                                rest.get(i + 1)
+                                    .ok_or_else(|| ParseError::MissingArguments {
+                                        context: "stream enable --port".to_string(),
+                                        usage: "stream enable [--port <port>]",
+                                    })?;
+                            let port =
+                                value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: '{}' is not a valid integer",
+                                        value
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                })?;
+                            if port > u16::MAX as u32 {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: {} is out of range (valid range: 0-65535)",
+                                        port
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                });
+                            }
+                            cmd["port"] = json!(port);
+                            i += 2;
+                        }
+                        flag => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unknown flag for stream enable: {}", flag),
+                                usage: "stream enable [--port <port>]",
+                            });
+                        }
+                    }
+                }
+                Ok(cmd)
+            }
+            Some("disable") => Ok(json!({ "id": id, "action": "stream_disable" })),
+            Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["enable", "disable", "status"],
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "stream".to_string(),
+                usage: "stream <enable|disable|status>",
+            }),
+        },
+
         // === Get ===
-        "get" => parse_get(&rest, &id),
 
         // === Is (state checks) ===
         "is" => parse_is(&rest, &id),
@@ -865,10 +873,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "find" => parse_find(&rest, &id),
 
         // === Mouse ===
-        "mouse" => parse_mouse(&rest, &id),
 
         // === Set (browser settings) ===
         "set" => parse_set(&rest, &id),
+
+        // === Network ===
 
         // === Storage ===
         "storage" => parse_storage(&rest, &id),
@@ -1090,7 +1099,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "window" => {
             const VALID: &[&str] = &["new"];
             match rest.first().copied() {
-                Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
@@ -1116,35 +1124,120 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
 
         // === Dialog ===
-        "dialog" => {
-            const VALID: &[&str] = &["accept", "dismiss", "status"];
+
+        // === Debug ===
+        "trace" => {
+            const VALID: &[&str] = &["start", "stop"];
             match rest.first().copied() {
-                Some("accept") => {
-                    let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
-                    if let Some(prompt_text) = rest.get(1) {
-                        cmd["promptText"] = json!(prompt_text);
+                Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "trace_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
                     }
                     Ok(cmd)
                 }
-                Some("dismiss") => {
-                    let mut cmd = json!({ "id": id, "action": "dialog", "response": "dismiss" });
-                    if let Some(prompt_text) = rest.get(1) {
-                        cmd["promptText"] = json!(prompt_text);
-                    }
-                    Ok(cmd)
-                }
-                Some("status") => Ok(json!({ "id": id, "action": "dialog", "response": "status" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
-                    context: "dialog".to_string(),
-                    usage: "dialog <accept|dismiss|status> [text]",
+                    context: "trace".to_string(),
+                    usage: "trace <start|stop> [path]",
                 }),
             }
         }
 
+        // === Profiler (CDP Tracing / Chromium profiling) ===
+        "profiler" => {
+            const VALID: &[&str] = &["start", "stop"];
+            match rest.first().copied() {
+                Some("start") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_start" });
+                    if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
+                        if let Some(cats) = rest.get(idx + 1) {
+                            let categories: Vec<&str> = cats.split(',').collect();
+                            cmd["categories"] = json!(categories);
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "profiler start --categories".to_string(),
+                                usage: "--categories <list>",
+                            });
+                        }
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "profiler".to_string(),
+                    usage: "profiler <start|stop> [options]",
+                }),
+            }
+        }
+
+        // === Recording (browser video recording) ===
+        "record" => {
+            const VALID: &[&str] = &["start", "stop", "restart"];
+            match rest.first().copied() {
+                Some("start") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "record start".to_string(),
+                        usage: "record start <output.webm> [url]",
+                    })?;
+                    // Optional URL parameter
+                    let url = rest.get(2);
+                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
+                    if let Some(u) = url {
+                        // Add https:// prefix if needed (preserve special schemes)
+                        let url_str = if u.starts_with("http") || u.contains("://") {
+                            u.to_string()
+                        } else {
+                            format!("https://{}", u)
+                        };
+                        cmd["url"] = json!(url_str);
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
+                Some("restart") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "record restart".to_string(),
+                        usage: "record restart <output.webm> [url]",
+                    })?;
+                    // Optional URL parameter
+                    let url = rest.get(2);
+                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
+                    if let Some(u) = url {
+                        // Add https:// prefix if needed (preserve special schemes)
+                        let url_str = if u.starts_with("http") || u.contains("://") {
+                            u.to_string()
+                        } else {
+                            format!("https://{}", u)
+                        };
+                        cmd["url"] = json!(url_str);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "record".to_string(),
+                    usage: "record <start|stop|restart> [path] [url]",
+                }),
+            }
+        }
         "console" => {
             let clear = rest.contains(&"--clear");
             Ok(json!({ "id": id, "action": "console", "clear": clear }))
@@ -1161,26 +1254,125 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(json!({ "id": id, "action": "highlight", "selector": sel }))
         }
 
-        // === Clipboard ===
-        "clipboard" => match rest.first().copied() {
-            Some("read") | None => {
-                Ok(json!({ "id": id, "action": "clipboard", "operation": "read" }))
+        // === State ===
+        "state" => {
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
+            match rest.first().copied() {
+                Some("save") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state save".to_string(),
+                        usage: "state save <path>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
+                }
+                Some("load") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state load".to_string(),
+                        usage: "state load <path>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
+                }
+                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
+                Some("clear") => {
+                    let mut session_name: Option<&str> = None;
+                    let mut all = false;
+
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--all" | "-a" => {
+                                all = true;
+                            }
+                            arg if !arg.starts_with('-') => {
+                                session_name = Some(arg);
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+
+                    if let Some(name) = session_name {
+                        if !is_valid_session_name(name) {
+                            return Err(ParseError::InvalidSessionName {
+                                name: name.to_string(),
+                            });
+                        }
+                    }
+
+                    let mut cmd = json!({ "id": id, "action": "state_clear" });
+                    if all {
+                        cmd["all"] = json!(true);
+                    }
+                    if let Some(name) = session_name {
+                        cmd["sessionName"] = json!(name);
+                    }
+                    Ok(cmd)
+                }
+                Some("show") => {
+                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state show".to_string(),
+                        usage: "state show <filename>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
+                }
+                Some("clean") => {
+                    let mut days: Option<i64> = None;
+
+                    let mut i = 1;
+                    while i < rest.len() {
+                        if rest[i] == "--older-than" {
+                            if let Some(d) = rest.get(i + 1) {
+                                days = d.parse().ok();
+                                i += 1;
+                            }
+                        }
+                        i += 1;
+                    }
+
+                    let days = days.ok_or_else(|| ParseError::MissingArguments {
+                        context: "state clean".to_string(),
+                        usage: "state clean --older-than <days>",
+                    })?;
+
+                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                }
+                Some("rename") => {
+                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let old_name = old_name.trim_end_matches(".json");
+                    let new_name = new_name.trim_end_matches(".json");
+
+                    if !is_valid_session_name(old_name) {
+                        return Err(ParseError::InvalidSessionName {
+                            name: old_name.to_string(),
+                        });
+                    }
+                    if !is_valid_session_name(new_name) {
+                        return Err(ParseError::InvalidSessionName {
+                            name: new_name.to_string(),
+                        });
+                    }
+
+                    Ok(
+                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
+                    )
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "state".to_string(),
+                    usage: "state <save|load|list|clear|show|clean|rename> ...",
+                }),
             }
-            Some("write") => {
-                rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                    context: "clipboard write".to_string(),
-                    usage: "clipboard write <text>",
-                })?;
-                let text = rest[1..].join(" ");
-                Ok(json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }))
-            }
-            Some("copy") => Ok(json!({ "id": id, "action": "clipboard", "operation": "copy" })),
-            Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
-            Some(sub) => Err(ParseError::UnknownSubcommand {
-                subcommand: sub.to_string(),
-                valid_options: &["read", "write", "copy", "paste"],
-            }),
-        },
+        }
 
         // === iOS-specific commands ===
         "tap" => {
@@ -1191,42 +1383,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             })?;
             Ok(json!({ "id": id, "action": "tap", "selector": sel }))
         }
-        "swipe" => {
-            let direction = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "swipe".to_string(),
-                usage: "swipe <up|down|left|right> [distance]",
-            })?;
-            let valid_directions = ["up", "down", "left", "right"];
-            if !valid_directions.contains(direction) {
-                return Err(ParseError::InvalidValue {
-                    message: format!("Invalid swipe direction: {}", direction),
-                    usage: "swipe <up|down|left|right> [distance]",
-                });
-            }
-            let mut cmd = json!({ "id": id, "action": "swipe", "direction": direction });
-            if let Some(distance) = rest.get(1) {
-                if let Ok(d) = distance.parse::<u32>() {
-                    cmd.as_object_mut()
-                        .unwrap()
-                        .insert("distance".to_string(), json!(d));
-                }
-            }
-            Ok(cmd)
-        }
-        "device" => {
-            match rest.first().copied() {
-                Some("list") | None => {
-                    // List available iOS simulators
-                    Ok(json!({ "id": id, "action": "device_list" }))
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: &["list"],
-                }),
-            }
-        }
 
-        // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
             let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
@@ -1237,422 +1394,29 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === React (requires `open --enable react-devtools`) ===
+
+        // === Core Web Vitals + hydration ===
+
+        // === SPA client-side navigation ===
+
+        // === Remove init script ===
+        "removeinitscript" => {
+            let identifier = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "removeinitscript".to_string(),
+                usage: "removeinitscript <identifier>",
+            })?;
+            Ok(json!({ "id": id, "action": "removeinitscript", "identifier": identifier }))
+        }
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
         }),
     }
 }
 
-fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["tree", "inspect", "renders", "suspense"];
-    let sub = rest.first().copied().ok_or(ParseError::MissingArguments {
-        context: "react".to_string(),
-        usage: "react <tree|inspect|renders|suspense>",
-    })?;
-    let json_out = rest.contains(&"--json");
-    let flag = |key: &str| -> Value {
-        if json_out {
-            json!({ "id": id, "action": key, "json": true })
-        } else {
-            json!({ "id": id, "action": key })
-        }
-    };
-    match sub {
-        "tree" => Ok(flag("react_tree")),
-        "inspect" => {
-            let id_arg = rest
-                .iter()
-                .skip(1)
-                .find(|a| !a.starts_with("--"))
-                .copied()
-                .ok_or(ParseError::MissingArguments {
-                    context: "react inspect".to_string(),
-                    usage: "react inspect <id>",
-                })?;
-            let numeric: i64 = id_arg.parse().map_err(|_| ParseError::InvalidValue {
-                message: format!("react inspect id must be a number, got '{}'", id_arg),
-                usage: "react inspect <id>",
-            })?;
-            let mut cmd = json!({ "id": id, "action": "react_inspect", "fiberId": numeric });
-            if json_out {
-                cmd["json"] = json!(true);
-            }
-            Ok(cmd)
-        }
-        "renders" => {
-            let op = rest.get(1).copied().unwrap_or("start");
-            match op {
-                "start" => Ok(flag("react_renders_start")),
-                "stop" => Ok(flag("react_renders_stop")),
-                other => Err(ParseError::UnknownSubcommand {
-                    subcommand: other.to_string(),
-                    valid_options: &["start", "stop"],
-                }),
-            }
-        }
-        "suspense" => {
-            let only_dynamic = rest.contains(&"--only-dynamic");
-            let mut cmd = json!({ "id": id, "action": "react_suspense" });
-            if json_out {
-                cmd["json"] = json!(true);
-            }
-            if only_dynamic {
-                cmd["onlyDynamic"] = json!(true);
-            }
-            Ok(cmd)
-        }
-        other => Err(ParseError::UnknownSubcommand {
-            subcommand: other.to_string(),
-            valid_options: VALID,
-        }),
-    }
-}
 
-fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["snapshot", "screenshot", "url"];
 
-    match rest.first().copied() {
-        Some("snapshot") => {
-            let mut cmd = json!({ "id": id, "action": "diff_snapshot" });
-            let obj = cmd.as_object_mut().unwrap();
-            let mut i = 1;
-            while i < rest.len() {
-                match rest[i] {
-                    "-b" | "--baseline" => {
-                        if let Some(path) = rest.get(i + 1) {
-                            obj.insert("baseline".to_string(), json!(path));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff snapshot --baseline".to_string(),
-                                usage: "diff snapshot --baseline <file>",
-                            });
-                        }
-                    }
-                    "-s" | "--selector" => {
-                        if let Some(s) = rest.get(i + 1) {
-                            obj.insert("selector".to_string(), json!(s));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff snapshot --selector".to_string(),
-                                usage: "diff snapshot --selector <sel>",
-                            });
-                        }
-                    }
-                    "-c" | "--compact" => {
-                        obj.insert("compact".to_string(), json!(true));
-                    }
-                    "-d" | "--depth" => {
-                        if let Some(d) = rest.get(i + 1) {
-                            match d.parse::<u32>() {
-                                Ok(n) => {
-                                    obj.insert("maxDepth".to_string(), json!(n));
-                                    i += 1;
-                                }
-                                Err(_) => {
-                                    return Err(ParseError::InvalidValue {
-                                        message: format!(
-                                            "Depth must be a non-negative integer, got: {}",
-                                            d
-                                        ),
-                                        usage: "diff snapshot --depth <n>",
-                                    });
-                                }
-                            }
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff snapshot --depth".to_string(),
-                                usage: "diff snapshot --depth <n>",
-                            });
-                        }
-                    }
-                    other if other.starts_with('-') => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
-                        });
-                    }
-                    other => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
-                        });
-                    }
-                }
-                i += 1;
-            }
-            Ok(cmd)
-        }
-        Some("screenshot") => {
-            let mut cmd = json!({ "id": id, "action": "diff_screenshot" });
-            let obj = cmd.as_object_mut().unwrap();
-            let mut i = 1;
-            while i < rest.len() {
-                match rest[i] {
-                    "-b" | "--baseline" => {
-                        if let Some(path) = rest.get(i + 1) {
-                            obj.insert("baseline".to_string(), json!(path));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff screenshot --baseline".to_string(),
-                                usage: "diff screenshot --baseline <file>",
-                            });
-                        }
-                    }
-                    "-o" | "--output" => {
-                        if let Some(path) = rest.get(i + 1) {
-                            obj.insert("output".to_string(), json!(path));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff screenshot --output".to_string(),
-                                usage: "diff screenshot --output <file>",
-                            });
-                        }
-                    }
-                    "-t" | "--threshold" => {
-                        if let Some(t) = rest.get(i + 1) {
-                            match t.parse::<f64>() {
-                                Ok(n) if (0.0..=1.0).contains(&n) => {
-                                    obj.insert("threshold".to_string(), json!(n));
-                                    i += 1;
-                                }
-                                Ok(n) => {
-                                    return Err(ParseError::InvalidValue {
-                                        message: format!(
-                                            "Threshold must be between 0 and 1, got {}",
-                                            n
-                                        ),
-                                        usage: "diff screenshot --threshold <0-1>",
-                                    });
-                                }
-                                Err(_) => {
-                                    return Err(ParseError::InvalidValue {
-                                        message: format!("Invalid threshold value: {}", t),
-                                        usage: "diff screenshot --threshold <0-1>",
-                                    });
-                                }
-                            }
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff screenshot --threshold".to_string(),
-                                usage: "diff screenshot --threshold <0-1>",
-                            });
-                        }
-                    }
-                    "-s" | "--selector" => {
-                        if let Some(s) = rest.get(i + 1) {
-                            obj.insert("selector".to_string(), json!(s));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff screenshot --selector".to_string(),
-                                usage: "diff screenshot --selector <sel>",
-                            });
-                        }
-                    }
-                    "--full" | "-f" => {
-                        obj.insert("fullPage".to_string(), json!(true));
-                    }
-                    other if other.starts_with('-') => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag: {}", other),
-                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full/-f]",
-                        });
-                    }
-                    other => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unexpected argument: {}", other),
-                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full/-f]",
-                        });
-                    }
-                }
-                i += 1;
-            }
-            if !obj.contains_key("baseline") {
-                return Err(ParseError::MissingArguments {
-                    context: "diff screenshot".to_string(),
-                    usage: "diff screenshot --baseline <file>",
-                });
-            }
-            Ok(cmd)
-        }
-        Some("url") => {
-            let url1 = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "diff url".to_string(),
-                usage: "diff url <url1> <url2>",
-            })?;
-            let url2 = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                context: "diff url".to_string(),
-                usage: "diff url <url1> <url2>",
-            })?;
-            let mut cmd = json!({
-                "id": id,
-                "action": "diff_url",
-                "url1": url1,
-                "url2": url2,
-            });
-            let obj = cmd.as_object_mut().unwrap();
-            let mut i = 3;
-            while i < rest.len() {
-                match rest[i] {
-                    "--screenshot" => {
-                        obj.insert("screenshot".to_string(), json!(true));
-                    }
-                    "--full" | "-f" => {
-                        obj.insert("fullPage".to_string(), json!(true));
-                    }
-                    "--wait-until" => {
-                        if let Some(val) = rest.get(i + 1) {
-                            obj.insert("waitUntil".to_string(), json!(val));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff url --wait-until".to_string(),
-                                usage: "diff url <url1> <url2> --wait-until <load|domcontentloaded|networkidle>",
-                            });
-                        }
-                    }
-                    "-s" | "--selector" => {
-                        if let Some(s) = rest.get(i + 1) {
-                            obj.insert("selector".to_string(), json!(s));
-                            i += 1;
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff url --selector".to_string(),
-                                usage: "diff url <url1> <url2> --selector <sel>",
-                            });
-                        }
-                    }
-                    "-c" | "--compact" => {
-                        obj.insert("compact".to_string(), json!(true));
-                    }
-                    "-d" | "--depth" => {
-                        if let Some(d) = rest.get(i + 1) {
-                            match d.parse::<u32>() {
-                                Ok(n) => {
-                                    obj.insert("maxDepth".to_string(), json!(n));
-                                    i += 1;
-                                }
-                                Err(_) => {
-                                    return Err(ParseError::InvalidValue {
-                                        message: format!(
-                                            "Depth must be a non-negative integer, got: {}",
-                                            d
-                                        ),
-                                        usage: "diff url <url1> <url2> --depth <n>",
-                                    });
-                                }
-                            }
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "diff url --depth".to_string(),
-                                usage: "diff url <url1> <url2> --depth <n>",
-                            });
-                        }
-                    }
-                    other if other.starts_with('-') => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag: {}", other),
-                            usage: "diff url <url1> <url2> [--screenshot] [--full/-f] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
-                        });
-                    }
-                    other => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unexpected argument: {}", other),
-                            usage: "diff url <url1> <url2> [--screenshot] [--full/-f] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
-                        });
-                    }
-                }
-                i += 1;
-            }
-            Ok(cmd)
-        }
-        Some(sub) => Err(ParseError::UnknownSubcommand {
-            subcommand: sub.to_string(),
-            valid_options: VALID,
-        }),
-        None => Err(ParseError::MissingArguments {
-            context: "diff".to_string(),
-            usage: "diff <snapshot|screenshot|url>",
-        }),
-    }
-}
-
-fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
-    ];
-
-    match rest.first().copied() {
-        Some("text") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get text".to_string(),
-                usage: "get text <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "gettext", "selector": sel }))
-        }
-        Some("html") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get html".to_string(),
-                usage: "get html <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "innerhtml", "selector": sel }))
-        }
-        Some("value") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get value".to_string(),
-                usage: "get value <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "inputvalue", "selector": sel }))
-        }
-        Some("attr") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get attr".to_string(),
-                usage: "get attr <selector> <attribute>",
-            })?;
-            let attr = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                context: "get attr".to_string(),
-                usage: "get attr <selector> <attribute>",
-            })?;
-            Ok(json!({ "id": id, "action": "getattribute", "selector": sel, "attribute": attr }))
-        }
-        Some("url") => Ok(json!({ "id": id, "action": "url" })),
-        Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
-        Some("title") => Ok(json!({ "id": id, "action": "title" })),
-        Some("count") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get count".to_string(),
-                usage: "get count <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "count", "selector": sel }))
-        }
-        Some("box") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get box".to_string(),
-                usage: "get box <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "boundingbox", "selector": sel }))
-        }
-        Some("styles") => {
-            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "get styles".to_string(),
-                usage: "get styles <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "styles", "selector": sel }))
-        }
-        Some(sub) => Err(ParseError::UnknownSubcommand {
-            subcommand: sub.to_string(),
-            valid_options: VALID,
-        }),
-        None => Err(ParseError::MissingArguments {
-            context: "get".to_string(),
-            usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url> [args...]",
-        }),
-    }
-}
 
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["visible", "enabled", "checked"];
@@ -1854,57 +1618,6 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
-fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["move", "down", "up", "wheel"];
-
-    match rest.first().copied() {
-        Some("move") => {
-            let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "mouse move".to_string(),
-                usage: "mouse move <x> <y>",
-            })?;
-            let y_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                context: "mouse move".to_string(),
-                usage: "mouse move <x> <y>",
-            })?;
-            let x = x_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            let y = y_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            Ok(json!({ "id": id, "action": "mousemove", "x": x, "y": y }))
-        }
-        Some("down") => {
-            Ok(json!({ "id": id, "action": "mousedown", "button": rest.get(1).unwrap_or(&"left") }))
-        }
-        Some("up") => {
-            Ok(json!({ "id": id, "action": "mouseup", "button": rest.get(1).unwrap_or(&"left") }))
-        }
-        Some("wheel") => {
-            let dy = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-            Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
-        }
-        Some(sub) => Err(ParseError::UnknownSubcommand {
-            subcommand: sub.to_string(),
-            valid_options: VALID,
-        }),
-        None => Err(ParseError::MissingArguments {
-            context: "mouse".to_string(),
-            usage: "mouse <move|down|up|wheel> [args...]",
-        }),
-    }
-}
 
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
@@ -2043,99 +1756,6 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 /// Parse network interception, request inspection, and HAR recording commands.
-fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
-
-    match rest.first().copied() {
-        Some("route") => {
-            let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "network route".to_string(),
-                usage: "network route <url> [--abort|--body <json>] [--resource-type <csv>]",
-            })?;
-            let abort = rest.contains(&"--abort");
-            let body_idx = rest.iter().position(|&s| s == "--body");
-            let body = body_idx.and_then(|i| rest.get(i + 1).copied());
-            let rt_idx = rest
-                .iter()
-                .position(|&s| s == "--resource-type" || s == "--resource-types");
-            let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
-            let mut cmd =
-                json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body });
-            if let Some(rt) = resource_type {
-                cmd["resourceType"] = json!(rt);
-            }
-            Ok(cmd)
-        }
-        Some("unroute") => {
-            let mut cmd = json!({ "id": id, "action": "unroute" });
-            if let Some(url) = rest.get(1) {
-                cmd["url"] = json!(url);
-            }
-            Ok(cmd)
-        }
-        Some("requests") => {
-            let clear = rest.contains(&"--clear");
-            let filter_idx = rest.iter().position(|&s| s == "--filter");
-            let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
-            let type_idx = rest.iter().position(|&s| s == "--type");
-            let rtype = type_idx.and_then(|i| rest.get(i + 1).copied());
-            let method_idx = rest.iter().position(|&s| s == "--method");
-            let method = method_idx.and_then(|i| rest.get(i + 1).copied());
-            let status_idx = rest.iter().position(|&s| s == "--status");
-            let status = status_idx.and_then(|i| rest.get(i + 1).copied());
-            let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
-            if let Some(f) = filter {
-                cmd["filter"] = json!(f);
-            }
-            if let Some(t) = rtype {
-                cmd["type"] = json!(t);
-            }
-            if let Some(m) = method {
-                cmd["method"] = json!(m);
-            }
-            if let Some(s) = status {
-                cmd["status"] = json!(s);
-            }
-            Ok(cmd)
-        }
-        Some("request") => {
-            let request_id = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "network request".to_string(),
-                usage: "network request <requestId>",
-            })?;
-            Ok(json!({ "id": id, "action": "request_detail", "requestId": request_id }))
-        }
-        Some("har") => {
-            const HAR_VALID: &[&str] = &["start", "stop"];
-            match rest.get(1).copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "har_stop" });
-                    if let Some(path) = rest.get(2) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: HAR_VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "network har".to_string(),
-                    usage: "network har <start|stop> [path]",
-                }),
-            }
-        }
-        Some(sub) => Err(ParseError::UnknownSubcommand {
-            subcommand: sub.to_string(),
-            valid_options: VALID,
-        }),
-        None => Err(ParseError::MissingArguments {
-            context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|har> [args...]",
-        }),
-    }
-}
 
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
@@ -2468,6 +2088,25 @@ mod tests {
         assert_eq!(cmd["action"], "react_suspense");
         assert_eq!(cmd["onlyDynamic"], true);
         assert_eq!(cmd["json"], true);
+    }
+
+    #[test]
+    fn test_vitals_command() {
+        let cmd = parse_command(&args("vitals"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "vitals");
+        let cmd = parse_command(
+            &args("vitals http://localhost:3000/dashboard"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "http://localhost:3000/dashboard");
+    }
+
+    #[test]
+    fn test_pushstate_command() {
+        let cmd = parse_command(&args("pushstate /foo"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pushstate");
+        assert_eq!(cmd["url"], "/foo");
     }
 
     #[test]
@@ -4000,8 +3639,47 @@ mod tests {
         assert_eq!(cmd["cdpPort"], 1);
     }
 
-    // === Trace Tests ===
+    // === Runtime stream control tests ===
 
+    #[test]
+    fn test_stream_enable_auto_port() {
+        let cmd = parse_command(&args("stream enable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert!(cmd.get("port").is_none());
+    }
+
+    #[test]
+    fn test_stream_enable_with_port() {
+        let cmd = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert_eq!(cmd["port"], 9223);
+    }
+
+    #[test]
+    fn test_stream_status() {
+        let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_status");
+    }
+
+    #[test]
+    fn test_stream_disable() {
+        let cmd = parse_command(&args("stream disable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_disable");
+    }
+
+    #[test]
+    fn test_stream_enable_invalid_port() {
+        let result = parse_command(&args("stream enable --port abc"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_stream_missing_subcommand() {
+        let result = parse_command(&args("stream"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    // === Trace Tests ===
 
     #[test]
     fn test_trace_start() {
